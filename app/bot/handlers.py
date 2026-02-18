@@ -110,6 +110,34 @@ async def menu_overview(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
     await c.answer()
 
 
+@router.callback_query(F.data == "menu:feed")
+async def menu_feed(c: CallbackQuery, api: ApiClient) -> None:
+    try:
+        feed = await api.get_feed_movers(universe=100, limit=20, min_change_pct=2.5)
+    except Exception as e:
+        await c.message.edit_text(f"Ошибка ленты: {e}", reply_markup=panel_actions_kb())
+        await c.answer()
+        return
+
+    movers = feed.get("movers", [])
+    lines = [
+        f"Лента топ-движений ({feed.get('universe_size', 0)} монет в сканере)",
+        "Резкие движения за 24ч:",
+        "",
+    ]
+    if not movers:
+        lines.append("Пока нет монет с сильным движением.")
+    else:
+        for row in movers[:20]:
+            arrow = "🟢" if row["direction"] == "up" else "🔴"
+            lines.append(
+                f"{arrow} {row['symbol']} {row['change_24h_pct']:+.2f}% "
+                f"| strength={row['strength']:.2f} | {row['action']}"
+            )
+    await c.message.edit_text("\n".join(lines), reply_markup=panel_actions_kb())
+    await c.answer()
+
+
 @router.callback_query(F.data == "settings:symbol")
 async def settings_symbol(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.choosing_symbol)

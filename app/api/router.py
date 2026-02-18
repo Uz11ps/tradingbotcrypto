@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     AnalyticsOut,
+    FeedOut,
     LiveSignalOut,
     MarketOverviewOut,
     NewsSentimentOut,
@@ -35,6 +36,7 @@ from app.services.ai_engine import (
 )
 from app.services.dex_data import DexDataError, fetch_dex_snapshot
 from app.services.market_data import MarketDataError, fetch_market_snapshot
+from app.services.market_feed import MarketFeedError, fetch_top_movers
 from app.services.news_sentiment import NewsSentimentError, fetch_news_and_sentiment
 from app.services.performance import build_performance_stats
 
@@ -45,6 +47,25 @@ ALLOWED_SOURCES = {"cex", "dex", "hybrid"}
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/feed/movers", response_model=FeedOut)
+async def feed_movers(
+    universe: int = 100,
+    limit: int = 15,
+    min_change_pct: float = 2.5,
+) -> FeedOut:
+    try:
+        payload = await fetch_top_movers(
+            universe_size=universe,
+            movers_limit=limit,
+            min_abs_change_pct=min_change_pct,
+        )
+    except MarketFeedError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=502, detail=f"Feed source error: {e}") from e
+    return FeedOut(**payload)
 
 
 @router.get("/signals", response_model=list[SignalOut])

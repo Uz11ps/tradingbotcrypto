@@ -86,3 +86,17 @@ class ApiClient:
         r.raise_for_status()
         return r.json()
 
+    async def get_feed_movers(
+        self,
+        *,
+        universe: int = 100,
+        limit: int = 20,
+        min_change_pct: float = 2.5,
+    ) -> dict[str, Any]:
+        r = await self._client.get(
+            "/feed/movers",
+            params={"universe": universe, "limit": limit, "min_change_pct": min_change_pct},
+        )
+        r.raise_for_status()
+        return r.json()
+

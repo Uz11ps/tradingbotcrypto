@@ -125,3 +125,20 @@ class SubscriptionDelete(BaseModel):
     symbol: str
     timeframe: str
 
+
+class FeedMoverOut(BaseModel):
+    symbol: str
+    direction: str
+    change_24h_pct: float
+    last_price: float
+    quote_volume: float
+    trades_count: int
+    strength: float
+    action: str
+
+
+class FeedOut(BaseModel):
+    generated_at: datetime
+    universe_size: int
+    movers: list[FeedMoverOut]
+

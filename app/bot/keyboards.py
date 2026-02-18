@@ -13,6 +13,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Настройки", callback_data="menu:settings"),
                 InlineKeyboardButton(text="Обзор", callback_data="menu:overview"),
             ],
+            [InlineKeyboardButton(text="Лента топ-движений", callback_data="menu:feed")],
             [
                 InlineKeyboardButton(text="Живой сигнал", callback_data="menu:signals"),
                 InlineKeyboardButton(text="Аналитика", callback_data="menu:analytics"),

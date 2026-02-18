@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 
 import httpx
 from aiogram import Bot
@@ -74,6 +75,50 @@ async def _generate_live_signal_for_pair(
     return r.json()
 
 
+async def _fetch_feed_movers(client: httpx.AsyncClient) -> list[dict[str, object]]:
+    r = await client.get(
+        "/feed/movers",
+        params={
+            "universe": settings.feed_universe_size,
+            "limit": settings.feed_movers_limit,
+            "min_change_pct": settings.feed_min_change_pct,
+        },
+    )
+    r.raise_for_status()
+    payload = r.json()
+    return payload.get("movers", [])
+
+
+async def _save_feed_signal(client: httpx.AsyncClient, mover: dict[str, object]) -> None:
+    r = await client.post(
+        "/signals",
+        json={
+            "symbol": mover["symbol"],
+            "timeframe": "1h",
+            "direction": mover["direction"],
+            "strength": mover["strength"],
+            "action": mover["action"],
+            "source": "cex",
+            "price": mover["last_price"],
+            "volume": mover["quote_volume"],
+            "reason": f"Feed mover: 24h change {mover['change_24h_pct']:+.2f}%",
+        },
+    )
+    r.raise_for_status()
+
+
+def _fmt_feed_msg(mover: dict[str, object]) -> str:
+    arrow = "🟢" if mover["direction"] == "up" else "🔴"
+    return (
+        f"FEED ALERT {arrow}\n"
+        f"{mover['symbol']} | change 24h: {mover['change_24h_pct']:+.2f}%\n"
+        f"Price: {mover['last_price']:.6f}\n"
+        f"Quote volume: {mover['quote_volume']:.2f}\n"
+        f"Strength: {mover['strength']:.2f}\n"
+        f"Action: {mover['action']}"
+    )
+
+
 async def main() -> None:
     setup_logging(settings.log_level)
     if not settings.api_public_base_url:
@@ -84,6 +129,7 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     client = httpx.AsyncClient(base_url=settings.api_public_base_url, timeout=15.0)
+    feed_sent_at: dict[str, float] = {}
 
     try:
         while True:
@@ -120,6 +166,35 @@ async def main() -> None:
 
                 await _update_performance(client, symbol, timeframe)
                 log.info("Signal generated (%s), delivered=%s", _fmt_log_msg(signal), sent)
+
+            # Лента: скан широкого пула монет и отправка только свежих сильных движений.
+            try:
+                movers = await _fetch_feed_movers(client)
+            except Exception:
+                log.exception("Feed movers fetch failed")
+                movers = []
+
+            now = time.time()
+            for mover in movers[:5]:
+                symbol = str(mover["symbol"])
+                strength = float(mover.get("strength", 0.0) or 0.0)
+                if strength < 0.58:
+                    continue
+                last_sent = feed_sent_at.get(symbol, 0.0)
+                if now - last_sent < settings.worker_feed_cooldown_seconds:
+                    continue
+                feed_sent_at[symbol] = now
+
+                try:
+                    await _save_feed_signal(client, mover)
+                except Exception:
+                    log.exception("Failed to save feed signal for %s", symbol)
+
+                if settings.telegram_signals_chat_id:
+                    try:
+                        await bot.send_message(settings.telegram_signals_chat_id, _fmt_feed_msg(mover))
+                    except Exception:
+                        log.exception("Failed to send feed alert for %s", symbol)
 
             await _tune_ai(client)
 

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://cryptoarbi:cryptoarbi@127.0.0.1:5432/cryptoarbi"
     redis_url: str = "redis://127.0.0.1:6379/0"
     worker_interval_seconds: int = 20
+    feed_universe_size: int = 100
+    feed_movers_limit: int = 20
+    feed_min_change_pct: float = 2.5
+    worker_feed_cooldown_seconds: int = 600
 
     log_level: str = "INFO"
 
