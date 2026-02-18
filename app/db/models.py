@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Enum, Float, Index, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+class SignalDirection(str, enum.Enum):
+    up = "up"
+    down = "down"
+
+
+class Signal(Base):
+    __tablename__ = "signals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)  # e.g. BTC/USDT
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)  # e.g. 15m, 1h, 4h, 1d
+
+    direction: Mapped[SignalDirection] = mapped_column(Enum(SignalDirection))
+    strength: Mapped[float] = mapped_column(Float)  # 0..1
+    action: Mapped[str] = mapped_column(String(16))  # entry/exit/hold
+
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AnalyticsLog(Base):
+    __tablename__ = "analytics_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    payload: Mapped[str] = mapped_column(Text)  # JSON string
+
+
+class AISetting(Base):
+    __tablename__ = "ai_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    value: Mapped[str] = mapped_column(Text)
+
+
+class UserSubscription(Base):
+    __tablename__ = "user_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
+
+
+class NewsAndSentiment(Base):
+    __tablename__ = "news_and_sentiment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(512))
+    url: Mapped[str] = mapped_column(String(1024))
+    sentiment: Mapped[float | None] = mapped_column(Float, nullable=True)  # -1..1
+    raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SignalPerformance(Base):
+    __tablename__ = "signal_performance"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(Integer, index=True, unique=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    timeframe: Mapped[str] = mapped_column(String(16), index=True)
+    pnl_pct: Mapped[float] = mapped_column(Float)
+    is_win: Mapped[bool] = mapped_column(index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+Index("ix_signals_symbol_timeframe_created_at", Signal.symbol, Signal.timeframe, Signal.created_at)
+Index("ix_news_symbol_created_at", NewsAndSentiment.symbol, NewsAndSentiment.created_at)
+Index("ix_subscriptions_chat_symbol_timeframe", UserSubscription.chat_id, UserSubscription.symbol, UserSubscription.timeframe, unique=True)
+
