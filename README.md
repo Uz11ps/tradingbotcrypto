@@ -46,3 +46,25 @@ python -m app.api.main
 python -m app.bot.main
 ```
 
+## Деплой на сервер (SSH)
+
+В проекте есть скрипт `scripts/deploy_server.py`, который:
+- подключается по SSH;
+- ставит Docker/compose (если нужно);
+- обновляет репозиторий на сервере;
+- создает `.env`;
+- поднимает стек `docker compose` с профилем `worker`.
+
+Пример запуска:
+
+```bash
+python scripts/deploy_server.py \
+  --host 72.56.121.150 \
+  --user root \
+  --password "YOUR_PASSWORD" \
+  --repo-url "https://github.com/Uz11ps/tradingbotcrypto.git" \
+  --branch main \
+  --bot-token "YOUR_TELEGRAM_BOT_TOKEN" \
+  --signals-chat-id 0
+```
+
