@@ -92,11 +92,42 @@ class ApiClient:
         universe: int = 100,
         limit: int = 20,
         min_change_pct: float = 2.5,
+        chat_id: int | None = None,
     ) -> dict[str, Any]:
+        params: dict[str, Any] = {"universe": universe, "limit": limit, "min_change_pct": min_change_pct}
+        if chat_id is not None:
+            params["chat_id"] = chat_id
         r = await self._client.get(
             "/feed/movers",
-            params={"universe": universe, "limit": limit, "min_change_pct": min_change_pct},
+            params=params,
         )
+        r.raise_for_status()
+        return r.json()
+
+    async def get_user_settings(self, *, chat_id: int) -> dict[str, Any]:
+        r = await self._client.get("/user-settings", params={"chat_id": chat_id})
+        r.raise_for_status()
+        return r.json()
+
+    async def update_user_settings(
+        self,
+        *,
+        chat_id: int,
+        lower_rsi: float | None = None,
+        upper_rsi: float | None = None,
+        active_timeframes: list[str] | None = None,
+        min_quote_volume: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if lower_rsi is not None:
+            payload["lower_rsi"] = lower_rsi
+        if upper_rsi is not None:
+            payload["upper_rsi"] = upper_rsi
+        if active_timeframes is not None:
+            payload["active_timeframes"] = active_timeframes
+        if min_quote_volume is not None:
+            payload["min_quote_volume"] = min_quote_volume
+        r = await self._client.post("/user-settings", params={"chat_id": chat_id}, json=payload)
         r.raise_for_status()
         return r.json()
 

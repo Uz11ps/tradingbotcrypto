@@ -2,85 +2,59 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-DEFAULT_TIMEFRAMES: list[str] = ["15m", "1h", "4h", "1d"]
-DEFAULT_SYMBOLS: list[str] = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+DEFAULT_TIMEFRAMES: list[str] = ["5m", "15m", "1h", "4h"]
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Настройки", callback_data="menu:settings"),
-                InlineKeyboardButton(text="Обзор", callback_data="menu:overview"),
-            ],
-            [InlineKeyboardButton(text="Лента топ-движений", callback_data="menu:feed")],
-            [
-                InlineKeyboardButton(text="Живой сигнал", callback_data="menu:signals"),
-                InlineKeyboardButton(text="Аналитика", callback_data="menu:analytics"),
-            ],
-            [
-                InlineKeyboardButton(text="Статистика", callback_data="menu:stats"),
-                InlineKeyboardButton(text="Подписки", callback_data="menu:subs"),
-            ],
+            [InlineKeyboardButton(text="Лента", callback_data="menu:feed")],
+            [InlineKeyboardButton(text="Настройки", callback_data="menu:settings")],
+            [InlineKeyboardButton(text="Информация", callback_data="menu:info")],
         ]
     )
 
 
-def settings_kb() -> InlineKeyboardMarkup:
+def settings_kb(
+    *,
+    active_timeframes: list[str],
+    lower_rsi: float,
+    upper_rsi: float,
+) -> InlineKeyboardMarkup:
+    def mark(tf: str) -> str:
+        return ("✅ " if tf in active_timeframes else "⬜ ") + tf
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Монета", callback_data="settings:symbol"),
-                InlineKeyboardButton(text="Таймфрейм", callback_data="settings:tf"),
+                InlineKeyboardButton(text=mark("5m"), callback_data="settings:tf:5m"),
+                InlineKeyboardButton(text=mark("15m"), callback_data="settings:tf:15m"),
             ],
-            [InlineKeyboardButton(text="Подписать текущую пару", callback_data="subs:add")],
-            [InlineKeyboardButton(text="Обновить меню", callback_data="menu:home")],
+            [
+                InlineKeyboardButton(text=mark("1h"), callback_data="settings:tf:1h"),
+                InlineKeyboardButton(text=mark("4h"), callback_data="settings:tf:4h"),
+            ],
+            [
+                InlineKeyboardButton(text=f"RSI low - ({lower_rsi:.0f})", callback_data="settings:rsi:lower:down"),
+                InlineKeyboardButton(text=f"RSI low + ({lower_rsi:.0f})", callback_data="settings:rsi:lower:up"),
+            ],
+            [
+                InlineKeyboardButton(text=f"RSI high - ({upper_rsi:.0f})", callback_data="settings:rsi:upper:down"),
+                InlineKeyboardButton(text=f"RSI high + ({upper_rsi:.0f})", callback_data="settings:rsi:upper:up"),
+            ],
+            [InlineKeyboardButton(text="Сбросить по умолчанию", callback_data="settings:reset")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="menu:home")],
         ]
     )
-
-
-def timeframes_kb(timeframes: list[str] | None = None) -> InlineKeyboardMarkup:
-    tfs = timeframes or DEFAULT_TIMEFRAMES
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for tf in tfs:
-        row.append(InlineKeyboardButton(text=tf, callback_data=f"pick:tf:{tf}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text="Назад к настройкам", callback_data="menu:settings")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def symbols_kb(symbols: list[str] | None = None) -> InlineKeyboardMarkup:
-    syms = symbols or DEFAULT_SYMBOLS
-    rows: list[list[InlineKeyboardButton]] = []
-    for sym in syms:
-        rows.append([InlineKeyboardButton(text=sym, callback_data=f"pick:sym:{sym}")])
-    rows.append([InlineKeyboardButton(text="Назад к настройкам", callback_data="menu:settings")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def panel_actions_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Обновить", callback_data="menu:refresh"),
+                InlineKeyboardButton(text="Обновить ленту", callback_data="menu:feed"),
                 InlineKeyboardButton(text="Главное меню", callback_data="menu:home"),
             ],
-            [InlineKeyboardButton(text="Подписать текущую пару", callback_data="subs:add")],
         ]
     )
-
-
-def subscriptions_kb(has_current: bool) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="Добавить текущую", callback_data="subs:add")]
-    ]
-    if has_current:
-        rows.append([InlineKeyboardButton(text="Удалить текущую", callback_data="subs:remove")])
-    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="menu:home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 

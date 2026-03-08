@@ -3,13 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import time
 
 import httpx
 from aiogram import Bot
 
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.services.binance_candles import BinanceCandlesError, build_snapshot, fetch_closes
+from app.services.binance_universe import BinanceUniverseError, fetch_spot_symbols
+from app.services.feed_formatter import format_signal_card
+from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal
+from app.services.signal_filters import SignalFilterEngine
 
 log = logging.getLogger("workers.mock_signal_worker")
 
@@ -94,14 +98,18 @@ async def _save_feed_signal(client: httpx.AsyncClient, mover: dict[str, object])
         "/signals",
         json={
             "symbol": mover["symbol"],
-            "timeframe": "1h",
+            "timeframe": mover.get("timeframe", "1h"),
             "direction": mover["direction"],
-            "strength": mover["strength"],
-            "action": mover["action"],
-            "source": "cex",
+            "strength": float(mover.get("strength", 0.0) or 0.0),
+            "action": mover.get("action", "watch"),
+            "source": str(mover.get("source", "cex")),
+            "signal_type": mover.get("signal_type"),
+            "trigger_source": mover.get("trigger_source"),
+            "rsi_value": mover.get("rsi_value"),
+            "prev_price": mover.get("prev_price"),
             "price": mover["last_price"],
-            "volume": mover["quote_volume"],
-            "reason": f"Feed mover: 24h change {mover['change_24h_pct']:+.2f}%",
+            "volume": mover.get("quote_volume"),
+            "reason": str(mover.get("reason", "feed mover")),
         },
     )
     r.raise_for_status()
@@ -119,6 +127,226 @@ def _fmt_feed_msg(mover: dict[str, object]) -> str:
     )
 
 
+async def _load_effective_settings(client: httpx.AsyncClient) -> dict[str, object]:
+    chat_id = settings.telegram_signals_chat_id if settings.telegram_signals_chat_id else 0
+    r = await client.get("/user-settings", params={"chat_id": chat_id})
+    r.raise_for_status()
+    return r.json()
+
+
+async def _run_legacy_mode(
+    client: httpx.AsyncClient,
+    bot: Bot,
+) -> None:
+    subscriptions = await _list_subscriptions(client)
+    pairs = {(str(s["symbol"]), str(s["timeframe"])) for s in subscriptions}
+    if not pairs:
+        pairs = {(random.choice(SYMBOLS), random.choice(TIMEFRAMES))}
+
+    for symbol, timeframe in pairs:
+        try:
+            signal = await _generate_live_signal_for_pair(client, symbol, timeframe)
+        except Exception:
+            log.exception("Signal generation failed for %s %s", symbol, timeframe)
+            continue
+
+        if subscriptions:
+            targets = [
+                int(s["chat_id"])
+                for s in subscriptions
+                if s["symbol"] == symbol and s["timeframe"] == timeframe and s["is_active"]
+            ]
+        else:
+            targets = [settings.telegram_signals_chat_id] if settings.telegram_signals_chat_id else []
+
+        sent = 0
+        for chat_id in targets:
+            if not chat_id:
+                continue
+            try:
+                await bot.send_message(chat_id, _fmt_signal_msg(signal))
+                sent += 1
+            except Exception:
+                log.exception("Failed to send signal to chat_id=%s", chat_id)
+
+        await _update_performance(client, symbol, timeframe)
+        log.info("Signal generated (%s), delivered=%s", _fmt_log_msg(signal), sent)
+
+    try:
+        movers = await _fetch_feed_movers(client)
+    except Exception:
+        log.exception("Feed movers fetch failed")
+        movers = []
+
+    for mover in movers[:5]:
+        symbol = str(mover.get("symbol", ""))
+        signal_type = str(mover.get("signal_type", "pump"))
+        direction = "up" if signal_type == "pump" else "down"
+        current_price = float(mover.get("current_price", mover.get("last_price", 0.0)) or 0.0)
+        prev_price = float(mover.get("prev_price", current_price) or current_price)
+        change_pct = float(mover.get("change_pct", mover.get("change_24h_pct", 0.0)) or 0.0)
+        try:
+            await _save_feed_signal(
+                client,
+                {
+                    "symbol": symbol,
+                    "timeframe": "1h",
+                    "direction": direction,
+                    "strength": 0.7,
+                    "action": "watch",
+                    "source": "cex",
+                    "signal_type": signal_type,
+                    "trigger_source": "legacy_feed",
+                    "prev_price": prev_price,
+                    "last_price": current_price,
+                    "quote_volume": None,
+                    "reason": f"Legacy feed change {change_pct:+.2f}%",
+                    "change_24h_pct": change_pct,
+                },
+            )
+        except Exception:
+            log.exception("Failed to save feed signal for %s", symbol)
+
+        if settings.telegram_signals_chat_id:
+            try:
+                await bot.send_message(
+                    settings.telegram_signals_chat_id,
+                    _fmt_feed_msg(
+                        {
+                            "symbol": symbol,
+                            "direction": direction,
+                            "change_24h_pct": change_pct,
+                            "last_price": current_price,
+                            "quote_volume": 0.0,
+                            "strength": 0.7,
+                            "action": "watch",
+                        }
+                    ),
+                )
+            except Exception:
+                log.exception("Failed to send feed alert for %s", symbol)
+
+
+async def _run_rsi_mode(
+    client: httpx.AsyncClient,
+    bot: Bot,
+    filters: SignalFilterEngine,
+    universe_cursor: int,
+) -> int:
+    try:
+        effective = await _load_effective_settings(client)
+        symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
+    except (BinanceUniverseError, Exception):
+        log.exception("Failed to load universe/settings in RSI mode")
+        return universe_cursor
+
+    active_timeframes = list(effective.get("active_timeframes") or ["5m", "15m", "1h", "4h"])
+    lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
+    upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
+    min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
+
+    if not symbols:
+        log.warning("RSI mode: empty symbols list")
+        return universe_cursor
+
+    batch_size = max(20, min(settings.feed_universe_size, len(symbols)))
+    start = universe_cursor % len(symbols)
+    selected = symbols[start : start + batch_size]
+    if len(selected) < batch_size:
+        selected.extend(symbols[: batch_size - len(selected)])
+    next_cursor = (start + batch_size) % len(symbols)
+
+    sent_in_cycle = 0
+    max_signals_per_cycle = max(1, settings.feed_movers_limit)
+    for symbol in selected:
+        if sent_in_cycle >= max_signals_per_cycle:
+            break
+        for timeframe in active_timeframes:
+            if sent_in_cycle >= max_signals_per_cycle:
+                break
+            try:
+                snapshot = await build_snapshot(symbol=symbol, timeframe=timeframe)
+                if snapshot.quote_volume_24h < min_quote_volume:
+                    log.info(
+                        "RSI reject: threshold reason=low_volume symbol=%s tf=%s quote_volume=%.2f min=%.2f",
+                        symbol,
+                        timeframe,
+                        snapshot.quote_volume_24h,
+                        min_quote_volume,
+                    )
+                    continue
+                closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
+                rsi_value = compute_rsi(closes, period=settings.rsi_period)
+                candidate = evaluate_rsi_signal(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    rsi_value=rsi_value,
+                    lower=lower_rsi,
+                    upper=upper_rsi,
+                    prev_price=snapshot.prev_close,
+                    current_price=snapshot.current_close,
+                    pct_change=snapshot.pct_change,
+                    generated_at=snapshot.generated_at,
+                )
+                if not candidate:
+                    log.info(
+                        "RSI reject: threshold symbol=%s tf=%s rsi=%.2f lower=%.2f upper=%.2f",
+                        symbol,
+                        timeframe,
+                        rsi_value,
+                        lower_rsi,
+                        upper_rsi,
+                    )
+                    continue
+            except (BinanceCandlesError, ValueError):
+                log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
+                continue
+
+            accepted, reject = filters.accept(candidate)
+            if not accepted:
+                log.info(
+                    "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
+                    reject.reason if reject else "unknown",
+                    candidate.symbol,
+                    candidate.timeframe,
+                    candidate.signal_type,
+                    reject.details if reject else "-",
+                )
+                continue
+
+            payload = {
+                "symbol": candidate.symbol,
+                "timeframe": candidate.timeframe,
+                "direction": "up" if candidate.signal_type == "pump" else "down",
+                "strength": 1.0,
+                "action": "entry",
+                "source": "cex",
+                "signal_type": candidate.signal_type,
+                "trigger_source": candidate.trigger_source,
+                "rsi_value": candidate.rsi_value,
+                "prev_price": candidate.prev_price,
+                "price": candidate.current_price,
+                "volume": snapshot.quote_volume_24h,
+                "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
+                "last_price": candidate.current_price,
+                "quote_volume": snapshot.quote_volume_24h,
+            }
+            try:
+                await _save_feed_signal(client, payload)
+            except Exception:
+                log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
+                continue
+
+            if settings.telegram_signals_chat_id:
+                try:
+                    await bot.send_message(settings.telegram_signals_chat_id, format_signal_card(candidate))
+                except Exception:
+                    log.exception("Failed to send RSI feed alert for %s", candidate.symbol)
+            sent_in_cycle += 1
+
+    return next_cursor
+
+
 async def main() -> None:
     setup_logging(settings.log_level)
     if not settings.api_public_base_url:
@@ -129,72 +357,18 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     client = httpx.AsyncClient(base_url=settings.api_public_base_url, timeout=15.0)
-    feed_sent_at: dict[str, float] = {}
+    filters = SignalFilterEngine(
+        cooldown_seconds=settings.worker_feed_cooldown_seconds,
+        dedup_window_seconds=settings.signal_dedup_window_seconds,
+    )
+    universe_cursor = 0
 
     try:
         while True:
-            subscriptions = await _list_subscriptions(client)
-            pairs = {(str(s["symbol"]), str(s["timeframe"])) for s in subscriptions}
-            if not pairs:
-                pairs = {(random.choice(SYMBOLS), random.choice(TIMEFRAMES))}
-
-            for symbol, timeframe in pairs:
-                try:
-                    signal = await _generate_live_signal_for_pair(client, symbol, timeframe)
-                except Exception:
-                    log.exception("Signal generation failed for %s %s", symbol, timeframe)
-                    continue
-
-                if subscriptions:
-                    targets = [
-                        int(s["chat_id"])
-                        for s in subscriptions
-                        if s["symbol"] == symbol and s["timeframe"] == timeframe and s["is_active"]
-                    ]
-                else:
-                    targets = [settings.telegram_signals_chat_id] if settings.telegram_signals_chat_id else []
-
-                sent = 0
-                for chat_id in targets:
-                    if not chat_id:
-                        continue
-                    try:
-                        await bot.send_message(chat_id, _fmt_signal_msg(signal))
-                        sent += 1
-                    except Exception:
-                        log.exception("Failed to send signal to chat_id=%s", chat_id)
-
-                await _update_performance(client, symbol, timeframe)
-                log.info("Signal generated (%s), delivered=%s", _fmt_log_msg(signal), sent)
-
-            # Лента: скан широкого пула монет и отправка только свежих сильных движений.
-            try:
-                movers = await _fetch_feed_movers(client)
-            except Exception:
-                log.exception("Feed movers fetch failed")
-                movers = []
-
-            now = time.time()
-            for mover in movers[:5]:
-                symbol = str(mover["symbol"])
-                strength = float(mover.get("strength", 0.0) or 0.0)
-                if strength < 0.58:
-                    continue
-                last_sent = feed_sent_at.get(symbol, 0.0)
-                if now - last_sent < settings.worker_feed_cooldown_seconds:
-                    continue
-                feed_sent_at[symbol] = now
-
-                try:
-                    await _save_feed_signal(client, mover)
-                except Exception:
-                    log.exception("Failed to save feed signal for %s", symbol)
-
-                if settings.telegram_signals_chat_id:
-                    try:
-                        await bot.send_message(settings.telegram_signals_chat_id, _fmt_feed_msg(mover))
-                    except Exception:
-                        log.exception("Failed to send feed alert for %s", symbol)
+            if settings.signal_engine_mode == "rsi":
+                universe_cursor = await _run_rsi_mode(client, bot, filters, universe_cursor)
+            else:
+                await _run_legacy_mode(client, bot)
 
             await _tune_ai(client)
 

@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     feed_movers_limit: int = 20
     feed_min_change_pct: float = 2.5
     worker_feed_cooldown_seconds: int = 600
+    signal_engine_mode: str = "legacy"  # legacy | rsi
+
+    rsi_default_lower: float = 25.0
+    rsi_default_upper: float = 75.0
+    rsi_default_timeframes: str = "5m,15m,1h,4h"
+    rsi_period: int = 14
+
+    binance_quote_asset: str = "USDT"
+    binance_min_quote_volume: float = 250000.0
+    signal_dedup_window_seconds: int = 300
 
     log_level: str = "INFO"
 

@@ -9,9 +9,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
-class SignalDirection(str, enum.Enum):
+class SignalDirection(enum.StrEnum):
     up = "up"
     down = "down"
+
+
+class SignalType(enum.StrEnum):
+    pump = "pump"
+    dump = "dump"
 
 
 class Signal(Base):
@@ -27,6 +32,10 @@ class Signal(Base):
     strength: Mapped[float] = mapped_column(Float)  # 0..1
     action: Mapped[str] = mapped_column(String(16))  # entry/exit/hold
 
+    signal_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    trigger_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    rsi_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prev_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     volume: Mapped[float | None] = mapped_column(Float, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -62,6 +71,24 @@ class UserSubscription(Base):
     is_active: Mapped[bool] = mapped_column(default=True)
 
 
+class UserSignalSettings(Base):
+    __tablename__ = "user_signal_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    lower_rsi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upper_rsi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_timeframes: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    min_quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class NewsAndSentiment(Base):
     __tablename__ = "news_and_sentiment"
 
@@ -89,6 +116,7 @@ class SignalPerformance(Base):
 
 
 Index("ix_signals_symbol_timeframe_created_at", Signal.symbol, Signal.timeframe, Signal.created_at)
+Index("ix_signals_symbol_signal_type_created_at", Signal.symbol, Signal.signal_type, Signal.created_at)
 Index("ix_news_symbol_created_at", NewsAndSentiment.symbol, NewsAndSentiment.created_at)
 Index("ix_subscriptions_chat_symbol_timeframe", UserSubscription.chat_id, UserSubscription.symbol, UserSubscription.timeframe, unique=True)
 

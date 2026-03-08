@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc, func, select
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
     AnalyticsOut,
+    FeedMoverOut,
     FeedOut,
     LiveSignalOut,
     MarketOverviewOut,
@@ -20,12 +22,16 @@ from app.api.schemas import (
     SubscriptionCreate,
     SubscriptionDelete,
     SubscriptionOut,
+    UserSignalSettingsOut,
+    UserSignalSettingsUpdate,
 )
+from app.core.config import settings
 from app.db.models import (
     AnalyticsLog,
     NewsAndSentiment,
     Signal,
     SignalDirection,
+    SignalType,
     UserSubscription,
 )
 from app.db.session import get_session
@@ -34,11 +40,20 @@ from app.services.ai_engine import (
     load_ai_settings,
     tune_strategy_from_history,
 )
+from app.services.binance_candles import (
+    TIMEFRAME_MAP,
+    BinanceCandlesError,
+    build_snapshot,
+    fetch_closes,
+)
+from app.services.binance_universe import BinanceUniverseError, fetch_spot_symbols
 from app.services.dex_data import DexDataError, fetch_dex_snapshot
 from app.services.market_data import MarketDataError, fetch_market_snapshot
 from app.services.market_feed import MarketFeedError, fetch_top_movers
 from app.services.news_sentiment import NewsSentimentError, fetch_news_and_sentiment
 from app.services.performance import build_performance_stats
+from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal
+from app.services.user_settings import get_effective_settings, upsert_user_settings
 
 router = APIRouter()
 ALLOWED_SOURCES = {"cex", "dex", "hybrid"}
@@ -54,7 +69,58 @@ async def feed_movers(
     universe: int = 100,
     limit: int = 15,
     min_change_pct: float = 2.5,
+    chat_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
 ) -> FeedOut:
+    if settings.signal_engine_mode == "rsi":
+        try:
+            effective = await get_effective_settings(session, chat_id=chat_id)
+            symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
+        except BinanceUniverseError as e:
+            raise HTTPException(status_code=502, detail=str(e)) from e
+
+        selected = symbols[: max(10, min(universe, len(symbols)))]
+        rows: list[FeedMoverOut] = []
+        for symbol in selected:
+            if len(rows) >= max(1, min(limit, 50)):
+                break
+            for timeframe in effective.active_timeframes:
+                if timeframe not in TIMEFRAME_MAP:
+                    continue
+                try:
+                    snapshot = await build_snapshot(symbol=symbol, timeframe=timeframe)
+                    if snapshot.quote_volume_24h < effective.min_quote_volume:
+                        continue
+                    closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
+                    rsi = compute_rsi(closes, period=settings.rsi_period)
+                    candidate = evaluate_rsi_signal(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        rsi_value=rsi,
+                        lower=effective.lower_rsi,
+                        upper=effective.upper_rsi,
+                        prev_price=snapshot.prev_close,
+                        current_price=snapshot.current_close,
+                        pct_change=snapshot.pct_change,
+                        generated_at=snapshot.generated_at,
+                    )
+                    if not candidate:
+                        continue
+                    rows.append(
+                        FeedMoverOut(
+                            symbol=candidate.symbol,
+                            direction="up" if candidate.signal_type == "pump" else "down",
+                            signal_type=candidate.signal_type,
+                            change_pct=candidate.pct_change,
+                            prev_price=candidate.prev_price,
+                            current_price=candidate.current_price,
+                            generated_at=candidate.generated_at,
+                        )
+                    )
+                except (BinanceCandlesError, ValueError):
+                    continue
+        return FeedOut(generated_at=datetime.now(tz=UTC), universe_size=len(selected), movers=rows[:limit])
+
     try:
         payload = await fetch_top_movers(
             universe_size=universe,
@@ -65,7 +131,19 @@ async def feed_movers(
         raise HTTPException(status_code=502, detail=str(e)) from e
     except Exception as e:  # pragma: no cover
         raise HTTPException(status_code=502, detail=f"Feed source error: {e}") from e
-    return FeedOut(**payload)
+    movers = [
+        FeedMoverOut(
+            symbol=m["symbol"],
+            direction=m["direction"],
+            signal_type="pump" if m["direction"] == "up" else "dump",
+            change_pct=float(m["change_24h_pct"]),
+            prev_price=float(m["last_price"]),
+            current_price=float(m["last_price"]),
+            generated_at=payload["generated_at"],
+        )
+        for m in payload.get("movers", [])
+    ]
+    return FeedOut(generated_at=payload["generated_at"], universe_size=payload["universe_size"], movers=movers)
 
 
 @router.get("/signals", response_model=list[SignalOut])
@@ -95,6 +173,10 @@ async def list_signals(
             strength=s.strength,
             action=s.action,
             source="hybrid",
+            signal_type=s.signal_type,
+            trigger_source=s.trigger_source,
+            rsi_value=s.rsi_value,
+            prev_price=s.prev_price,
             price=s.price,
             volume=s.volume,
             liquidity=None,
@@ -115,6 +197,12 @@ async def create_signal(
         raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'") from e
     if payload.source not in ALLOWED_SOURCES:
         raise HTTPException(status_code=400, detail="source must be 'cex', 'dex' or 'hybrid'")
+    signal_type: str | None = None
+    if payload.signal_type:
+        try:
+            signal_type = SignalType(payload.signal_type).value
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail="signal_type must be 'pump' or 'dump'") from e
 
     s = Signal(
         symbol=payload.symbol,
@@ -122,6 +210,10 @@ async def create_signal(
         direction=direction,
         strength=payload.strength,
         action=payload.action,
+        signal_type=signal_type,
+        trigger_source=payload.trigger_source,
+        rsi_value=payload.rsi_value,
+        prev_price=payload.prev_price,
         price=payload.price,
         volume=payload.volume,
         reason=payload.reason,
@@ -139,6 +231,10 @@ async def create_signal(
         strength=s.strength,
         action=s.action,
         source=payload.source,
+        signal_type=s.signal_type,
+        trigger_source=s.trigger_source,
+        rsi_value=s.rsi_value,
+        prev_price=s.prev_price,
         price=s.price,
         volume=s.volume,
         liquidity=payload.liquidity,
@@ -472,6 +568,44 @@ async def remove_subscription(
     row.is_active = False
     await session.commit()
     return {"ok": True}
+
+
+@router.get("/user-settings", response_model=UserSignalSettingsOut)
+async def get_user_settings(
+    chat_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> UserSignalSettingsOut:
+    effective = await get_effective_settings(session, chat_id=chat_id)
+    return UserSignalSettingsOut(
+        chat_id=chat_id or 0,
+        lower_rsi=effective.lower_rsi,
+        upper_rsi=effective.upper_rsi,
+        active_timeframes=effective.active_timeframes,
+        min_quote_volume=effective.min_quote_volume,
+    )
+
+
+@router.post("/user-settings", response_model=UserSignalSettingsOut)
+async def update_user_settings(
+    chat_id: int,
+    payload: UserSignalSettingsUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> UserSignalSettingsOut:
+    effective = await upsert_user_settings(
+        session,
+        chat_id=chat_id,
+        lower_rsi=payload.lower_rsi,
+        upper_rsi=payload.upper_rsi,
+        active_timeframes=payload.active_timeframes,
+        min_quote_volume=payload.min_quote_volume,
+    )
+    return UserSignalSettingsOut(
+        chat_id=chat_id,
+        lower_rsi=effective.lower_rsi,
+        upper_rsi=effective.upper_rsi,
+        active_timeframes=effective.active_timeframes,
+        min_quote_volume=effective.min_quote_volume,
+    )
 
 
 @router.post("/ai/tune")

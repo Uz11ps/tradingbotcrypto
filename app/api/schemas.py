@@ -14,6 +14,10 @@ class SignalOut(BaseModel):
     strength: float = Field(ge=0, le=1)
     action: str
     source: str = "hybrid"
+    signal_type: str | None = None
+    trigger_source: str | None = None
+    rsi_value: float | None = None
+    prev_price: float | None = None
     price: float | None = None
     volume: float | None = None
     liquidity: float | None = None
@@ -27,6 +31,10 @@ class SignalCreate(BaseModel):
     strength: float = Field(ge=0, le=1)
     action: str
     source: str = "hybrid"
+    signal_type: str | None = None
+    trigger_source: str | None = None
+    rsi_value: float | None = None
+    prev_price: float | None = None
     price: float | None = None
     volume: float | None = None
     liquidity: float | None = None
@@ -129,16 +137,30 @@ class SubscriptionDelete(BaseModel):
 class FeedMoverOut(BaseModel):
     symbol: str
     direction: str
-    change_24h_pct: float
-    last_price: float
-    quote_volume: float
-    trades_count: int
-    strength: float
-    action: str
+    signal_type: str
+    change_pct: float
+    prev_price: float
+    current_price: float
+    generated_at: datetime
 
 
 class FeedOut(BaseModel):
     generated_at: datetime
     universe_size: int
     movers: list[FeedMoverOut]
+
+
+class UserSignalSettingsUpdate(BaseModel):
+    lower_rsi: float | None = None
+    upper_rsi: float | None = None
+    active_timeframes: list[str] | None = None
+    min_quote_volume: float | None = None
+
+
+class UserSignalSettingsOut(BaseModel):
+    chat_id: int
+    lower_rsi: float
+    upper_rsi: float
+    active_timeframes: list[str]
+    min_quote_volume: float
 
