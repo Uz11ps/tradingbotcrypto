@@ -18,8 +18,6 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 def settings_kb(
     *,
     active_timeframes: list[str],
-    lower_rsi: float,
-    upper_rsi: float,
 ) -> InlineKeyboardMarkup:
     def mark(tf: str) -> str:
         return ("✅ " if tf in active_timeframes else "⬜ ") + tf
@@ -34,15 +32,6 @@ def settings_kb(
                 InlineKeyboardButton(text=mark("1h"), callback_data="settings:tf:1h"),
                 InlineKeyboardButton(text=mark("4h"), callback_data="settings:tf:4h"),
             ],
-            [
-                InlineKeyboardButton(text=f"RSI low - ({lower_rsi:.0f})", callback_data="settings:rsi:lower:down"),
-                InlineKeyboardButton(text=f"RSI low + ({lower_rsi:.0f})", callback_data="settings:rsi:lower:up"),
-            ],
-            [
-                InlineKeyboardButton(text=f"RSI high - ({upper_rsi:.0f})", callback_data="settings:rsi:upper:down"),
-                InlineKeyboardButton(text=f"RSI high + ({upper_rsi:.0f})", callback_data="settings:rsi:upper:up"),
-            ],
-            [InlineKeyboardButton(text="Сбросить по умолчанию", callback_data="settings:reset")],
             [InlineKeyboardButton(text="Главное меню", callback_data="menu:home")],
         ]
     )
@@ -52,7 +41,7 @@ def panel_actions_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Обновить ленту", callback_data="menu:feed"),
+                InlineKeyboardButton(text="Лента", callback_data="menu:feed"),
                 InlineKeyboardButton(text="Главное меню", callback_data="menu:home"),
             ],
         ]
