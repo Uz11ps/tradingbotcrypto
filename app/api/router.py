@@ -32,6 +32,7 @@ from app.db.models import (
     Signal,
     SignalDirection,
     SignalType,
+    UserSignalSettings,
     UserSubscription,
 )
 from app.db.session import get_session
@@ -606,6 +607,12 @@ async def update_user_settings(
         active_timeframes=effective.active_timeframes,
         min_quote_volume=effective.min_quote_volume,
     )
+
+
+@router.get("/user-settings/chats", response_model=list[int])
+async def list_user_settings_chats(session: AsyncSession = Depends(get_session)) -> list[int]:
+    rows = (await session.execute(select(UserSignalSettings.chat_id))).scalars().all()
+    return [int(chat_id) for chat_id in rows if chat_id]
 
 
 @router.post("/ai/tune")

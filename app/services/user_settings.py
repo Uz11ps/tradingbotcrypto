@@ -8,8 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import UserSignalSettings
 
-DEFAULT_TFS = ("5m", "15m", "1h", "4h")
+DEFAULT_TFS = ("15m",)
 ALLOWED_TFS = set(DEFAULT_TFS)
+ALLOWED_TFS.update({"5m", "1h", "4h"})
 
 
 @dataclass(slots=True)

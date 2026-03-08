@@ -127,11 +127,17 @@ def _fmt_feed_msg(mover: dict[str, object]) -> str:
     )
 
 
-async def _load_effective_settings(client: httpx.AsyncClient) -> dict[str, object]:
-    chat_id = settings.telegram_signals_chat_id if settings.telegram_signals_chat_id else 0
+async def _load_effective_settings(client: httpx.AsyncClient, *, chat_id: int) -> dict[str, object]:
     r = await client.get("/user-settings", params={"chat_id": chat_id})
     r.raise_for_status()
     return r.json()
+
+
+async def _list_signal_chats(client: httpx.AsyncClient) -> list[int]:
+    r = await client.get("/user-settings/chats")
+    r.raise_for_status()
+    raw = r.json()
+    return [int(x) for x in raw if int(x)]
 
 
 async def _run_legacy_mode(
@@ -234,16 +240,21 @@ async def _run_rsi_mode(
     universe_cursor: int,
 ) -> int:
     try:
-        effective = await _load_effective_settings(client)
         symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
     except (BinanceUniverseError, Exception):
         log.exception("Failed to load universe/settings in RSI mode")
         return universe_cursor
 
-    active_timeframes = list(effective.get("active_timeframes") or ["5m", "15m", "1h", "4h"])
-    lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
-    upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
-    min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
+    try:
+        chat_ids = await _list_signal_chats(client)
+    except Exception:
+        log.exception("Failed to load chat list in RSI mode")
+        chat_ids = []
+    if not chat_ids and settings.telegram_signals_chat_id:
+        chat_ids = [settings.telegram_signals_chat_id]
+    if not chat_ids:
+        log.info("RSI mode: no target chats registered yet")
+        return universe_cursor
 
     if not symbols:
         log.warning("RSI mode: empty symbols list")
@@ -256,24 +267,27 @@ async def _run_rsi_mode(
         selected.extend(symbols[: batch_size - len(selected)])
     next_cursor = (start + batch_size) % len(symbols)
 
-    sent_in_cycle = 0
-    max_signals_per_cycle = max(1, settings.feed_movers_limit)
-    for symbol in selected:
-        if sent_in_cycle >= max_signals_per_cycle:
-            break
-        for timeframe in active_timeframes:
+    for chat_id in chat_ids:
+        try:
+            effective = await _load_effective_settings(client, chat_id=chat_id)
+        except Exception:
+            log.exception("Failed to load settings for chat_id=%s", chat_id)
+            continue
+
+        active_timeframes = list(effective.get("active_timeframes") or ["15m"])
+        timeframe = active_timeframes[0]
+        lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
+        upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
+        min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
+
+        sent_in_cycle = 0
+        max_signals_per_cycle = max(1, settings.feed_movers_limit)
+        for symbol in selected:
             if sent_in_cycle >= max_signals_per_cycle:
                 break
             try:
                 snapshot = await build_snapshot(symbol=symbol, timeframe=timeframe)
                 if snapshot.quote_volume_24h < min_quote_volume:
-                    log.info(
-                        "RSI reject: threshold reason=low_volume symbol=%s tf=%s quote_volume=%.2f min=%.2f",
-                        symbol,
-                        timeframe,
-                        snapshot.quote_volume_24h,
-                        min_quote_volume,
-                    )
                     continue
                 closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
                 rsi_value = compute_rsi(closes, period=settings.rsi_period)
@@ -289,20 +303,12 @@ async def _run_rsi_mode(
                     generated_at=snapshot.generated_at,
                 )
                 if not candidate:
-                    log.info(
-                        "RSI reject: threshold symbol=%s tf=%s rsi=%.2f lower=%.2f upper=%.2f",
-                        symbol,
-                        timeframe,
-                        rsi_value,
-                        lower_rsi,
-                        upper_rsi,
-                    )
                     continue
             except (BinanceCandlesError, ValueError):
                 log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
                 continue
 
-            accepted, reject = filters.accept(candidate)
+            accepted, reject = filters.accept(candidate, scope=str(chat_id))
             if not accepted:
                 log.info(
                     "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
@@ -337,11 +343,11 @@ async def _run_rsi_mode(
                 log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
                 continue
 
-            if settings.telegram_signals_chat_id:
-                try:
-                    await bot.send_message(settings.telegram_signals_chat_id, format_signal_card(candidate))
-                except Exception:
-                    log.exception("Failed to send RSI feed alert for %s", candidate.symbol)
+            try:
+                await bot.send_message(chat_id, format_signal_card(candidate))
+            except Exception:
+                log.exception("Failed to send RSI feed alert for %s chat_id=%s", candidate.symbol, chat_id)
+                continue
             sent_in_cycle += 1
 
     return next_cursor

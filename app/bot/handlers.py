@@ -25,11 +25,11 @@ def _home_text() -> str:
 
 
 def _settings_text(cfg: dict[str, object]) -> str:
-    active = ", ".join(cfg.get("active_timeframes", [])) or "-"
+    active = ", ".join(cfg.get("active_timeframes", [])) or "15m"
     return (
         "Настройки фильтрации\n\n"
-        f"Активные таймфреймы: {active}\n"
-        "Выберите нужные таймфреймы кнопками ниже."
+        f"Таймфрейм для сигналов: {active}\n"
+        "Выберите один таймфрейм кнопками ниже."
     )
 
 
@@ -53,8 +53,10 @@ async def _render_settings(c: CallbackQuery, api: ApiClient) -> None:
 
 
 @router.message(CommandStart())
-async def start(m: Message, state: FSMContext) -> None:
+async def start(m: Message, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
+    # Register this chat for push stream delivery.
+    await api.update_user_settings(chat_id=m.chat.id)
     await _render_home(m, state)
 
 
@@ -76,7 +78,7 @@ async def menu_settings(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
 async def menu_feed(c: CallbackQuery) -> None:
     text = (
         "Лента сигналов работает в потоковом режиме.\n"
-        "Новые Pump/Dump сигналы приходят отдельными сообщениями в чат."
+        "Новые Pump/Dump сигналы приходят отдельными сообщениями в этот чат."
     )
     await c.message.edit_text(text, reply_markup=panel_actions_kb())
     await c.answer()
@@ -85,18 +87,9 @@ async def menu_feed(c: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("settings:tf:"))
 async def toggle_timeframe(c: CallbackQuery, api: ApiClient) -> None:
     tf = c.data.split(":")[-1]
-    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
-    active = list(cfg.get("active_timeframes", []))
-    if tf in active:
-        active = [x for x in active if x != tf]
-    else:
-        active.append(tf)
-    if not active:
-        await c.answer("Нужен хотя бы 1 таймфрейм", show_alert=True)
-        return
-    await api.update_user_settings(chat_id=c.message.chat.id, active_timeframes=active)
+    await api.update_user_settings(chat_id=c.message.chat.id, active_timeframes=[tf])
     await _render_settings(c, api)
-    await c.answer("Таймфреймы обновлены")
+    await c.answer("Таймфрейм обновлен")
 
 @router.callback_query(F.data == "menu:info")
 async def menu_info(c: CallbackQuery) -> None:

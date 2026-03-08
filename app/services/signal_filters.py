@@ -20,20 +20,20 @@ class SignalFilterEngine:
         self._last_fingerprint_at: dict[str, float] = {}
 
     @staticmethod
-    def _cooldown_key(candidate: RsiSignalCandidate) -> tuple[str, str, str]:
-        return (candidate.symbol, candidate.timeframe, candidate.signal_type)
+    def _cooldown_key(candidate: RsiSignalCandidate, scope: str) -> tuple[str, str, str, str]:
+        return (scope, candidate.symbol, candidate.timeframe, candidate.signal_type)
 
     @staticmethod
-    def _fingerprint(candidate: RsiSignalCandidate) -> str:
+    def _fingerprint(candidate: RsiSignalCandidate, scope: str) -> str:
         # Fingerprint keeps message-level uniqueness while preserving signal key cooldown.
         return (
-            f"{candidate.symbol}|{candidate.timeframe}|{candidate.signal_type}|"
+            f"{scope}|{candidate.symbol}|{candidate.timeframe}|{candidate.signal_type}|"
             f"{candidate.rsi_value:.2f}|{candidate.current_price:.8f}"
         )
 
-    def accept(self, candidate: RsiSignalCandidate) -> tuple[bool, RejectReason | None]:
+    def accept(self, candidate: RsiSignalCandidate, *, scope: str = "global") -> tuple[bool, RejectReason | None]:
         now = time.time()
-        key = self._cooldown_key(candidate)
+        key = self._cooldown_key(candidate, scope)
         last_sent = self._last_sent_at.get(key, 0.0)
         if self.cooldown_seconds and (now - last_sent < self.cooldown_seconds):
             return False, RejectReason(
@@ -41,7 +41,7 @@ class SignalFilterEngine:
                 details=f"key={key} wait_left={int(self.cooldown_seconds - (now - last_sent))}s",
             )
 
-        fingerprint = self._fingerprint(candidate)
+        fingerprint = self._fingerprint(candidate, scope)
         last_dup = self._last_fingerprint_at.get(fingerprint, 0.0)
         if self.dedup_window_seconds and (now - last_dup < self.dedup_window_seconds):
             return False, RejectReason(

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     rsi_default_lower: float = 25.0
     rsi_default_upper: float = 75.0
-    rsi_default_timeframes: str = "5m,15m,1h,4h"
+    rsi_default_timeframes: str = "15m"
     rsi_period: int = 14
 
     binance_quote_asset: str = "USDT"
