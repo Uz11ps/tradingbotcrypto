@@ -114,7 +114,10 @@ class Deployer:
 
     def up(self) -> None:
         self.run(f"cd '{self.cfg.deploy_dir}' && docker compose down || true")
-        self.run(f"cd '{self.cfg.deploy_dir}' && docker compose --profile worker up -d --build")
+        self.run(
+            f"cd '{self.cfg.deploy_dir}' && "
+            "docker compose --profile worker up -d --build --remove-orphans"
+        )
 
     def status(self) -> str:
         return self.run(f"cd '{self.cfg.deploy_dir}' && docker compose ps")
