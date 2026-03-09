@@ -3,43 +3,56 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.api_client import ApiClient
 from app.bot.keyboards import (
+    feed_kb,
     main_menu_kb,
     panel_actions_kb,
-    settings_kb,
+    settings_main_kb,
+    timeframes_kb,
 )
 from app.bot.states import UserFlow
 
 router = Router()
 
 
-def _home_text() -> str:
+def _status_line(cfg: dict[str, object]) -> str:
+    tfs = " ".join(cfg.get("active_timeframes", [])) or "15m"
+    rsi = f"{float(cfg.get('upper_rsi', 60)):.0f}/{float(cfg.get('lower_rsi', 40)):.0f}"
+    trigger = "2.5% / 4.5%"  # глобальные пороги
+    feed_status = "Вкл"
+    return f"ТФ: {tfs} | Триггер: {trigger} | RSI: {rsi} | Лента: {feed_status}"
+
+
+def _home_text(cfg: dict[str, object]) -> str:
     return (
         "Сигнальный бот\n\n"
-        "Сканируем Binance и отправляем Pump/Dump сигналы потоком в чат.\n"
-        "Выберите раздел:"
+        "Сканируем Binance и отправляем Pump/Dump сигналы.\n\n"
+        f"{_status_line(cfg)}"
     )
 
 
 def _settings_text(cfg: dict[str, object]) -> str:
-    active = ", ".join(cfg.get("active_timeframes", [])) or "15m"
-    min_price_move = float(cfg.get("min_price_move_pct", 1.5))
+    active = " ".join(cfg.get("active_timeframes", [])) or "15m"
     lower_rsi = float(cfg.get("lower_rsi", 40))
     upper_rsi = float(cfg.get("upper_rsi", 60))
+    min_vol = float(cfg.get("min_quote_volume", 500_000))
     return (
-        "Настройки фильтрации\n\n"
-        f"Таймфрейм для сигналов: {active}\n"
-        f"Процент отклонения: {min_price_move:.1f}%\n"
-        f"RSI: {lower_rsi:.0f}/{upper_rsi:.0f}\n"
-        "Выберите один таймфрейм кнопками ниже."
+        "⚙️ Настройки сигналов\n\n"
+        f"Таймфреймы: {active}\n"
+        "Триггер цены:\n"
+        " 5m ≥ 2.5%\n"
+        " 15m ≥ 4.5%\n\n"
+        f"RSI:\n pump ≥ {upper_rsi:.0f}\n dump ≤ {lower_rsi:.0f}\n\n"
+        f"Мин. объём 24h:\n ≥ ${min_vol:,.0f}"
     )
 
 
-async def _render_home(target: Message | CallbackQuery, state: FSMContext) -> None:
-    text = _home_text()
+async def _render_home(target: Message | CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=target.chat.id if isinstance(target, Message) else target.message.chat.id)
+    text = _home_text(cfg)
     if isinstance(target, Message):
         await target.answer(text, reply_markup=main_menu_kb())
     else:
@@ -49,15 +62,7 @@ async def _render_home(target: Message | CallbackQuery, state: FSMContext) -> No
 async def _render_settings(c: CallbackQuery, api: ApiClient) -> None:
     cfg = await api.get_user_settings(chat_id=c.message.chat.id)
     text = _settings_text(cfg)
-    await c.message.edit_text(
-        text,
-        reply_markup=settings_kb(
-            active_timeframes=list(cfg.get("active_timeframes", [])),
-            lower_rsi=float(cfg.get("lower_rsi", 40)),
-            upper_rsi=float(cfg.get("upper_rsi", 60)),
-            min_price_move_pct=float(cfg.get("min_price_move_pct", 1.5)),
-        ),
-    )
+    await c.message.edit_text(text, reply_markup=settings_main_kb())
 
 
 @router.message(CommandStart())
@@ -65,13 +70,13 @@ async def start(m: Message, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
     # Register this chat for push stream delivery.
     await api.update_user_settings(chat_id=m.chat.id)
-    await _render_home(m, state)
+    await _render_home(m, api)
 
 
 @router.callback_query(F.data == "menu:home")
-async def menu_home(c: CallbackQuery, state: FSMContext) -> None:
+async def menu_home(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
-    await _render_home(c, state)
+    await _render_home(c, api)
     await c.answer()
 
 
@@ -85,56 +90,208 @@ async def menu_settings(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
 @router.callback_query(F.data == "menu:feed")
 async def menu_feed(c: CallbackQuery) -> None:
     text = (
-        "Лента сигналов работает в потоковом режиме.\n"
-        "Новые Pump/Dump сигналы приходят отдельными сообщениями в этот чат."
+        "📡 Лента сигналов\n\n"
+        "Если включена — новые Pump/Dump сигналы\n"
+        "будут приходить в этот чат.\n\n"
+        "Статус: ВКЛЮЧЕНА"
     )
-    await c.message.edit_text(text, reply_markup=panel_actions_kb())
+    await c.message.edit_text(text, reply_markup=feed_kb(enabled=True))
     await c.answer()
 
 
-@router.callback_query(F.data.startswith("settings:tf:"))
-async def toggle_timeframe(c: CallbackQuery, api: ApiClient) -> None:
+@router.callback_query(F.data.in_(["feed:on", "feed:off"]))
+async def feed_toggle(c: CallbackQuery) -> None:
+    enabled = c.data == "feed:on"
+    status = "ВКЛЮЧЕНА" if enabled else "ВЫКЛЮЧЕНА"
+    text = (
+        "📡 Лента сигналов\n\n"
+        "Если включена — новые Pump/Dump сигналы\n"
+        "будут приходить в этот чат.\n\n"
+        f"Статус: {status}"
+    )
+    await c.message.edit_text(text, reply_markup=feed_kb(enabled=enabled))
+    await c.answer("Статус ленты обновлён")
+
+
+@router.callback_query(F.data == "settings:tfs")
+async def settings_tfs(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    await state.set_state(UserFlow.choosing_timeframe)
+    await c.message.edit_text(
+        "Выберите таймфреймы:",
+        reply_markup=timeframes_kb(list(cfg.get("active_timeframes", []))),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("tfs:toggle:"), UserFlow.choosing_timeframe)
+async def toggle_tfs(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
     tf = c.data.split(":")[-1]
-    await api.update_user_settings(chat_id=c.message.chat.id, active_timeframes=[tf])
-    await _render_settings(c, api)
-    await c.answer("Таймфрейм обновлен")
-
-
-@router.callback_query(F.data.startswith("settings:move:"))
-async def change_min_price_move(c: CallbackQuery, api: ApiClient) -> None:
-    direction = c.data.split(":")[-1]
     cfg = await api.get_user_settings(chat_id=c.message.chat.id)
-    current = float(cfg.get("min_price_move_pct", 1.5))
-    step = 0.5
-    updated = current + step if direction == "up" else current - step
-    updated = max(0.5, min(5.0, updated))
-    await api.update_user_settings(chat_id=c.message.chat.id, min_price_move_pct=updated)
-    await _render_settings(c, api)
-    await c.answer("Отклонение обновлено")
-
-
-@router.callback_query(F.data.startswith("settings:rsi:"))
-async def change_rsi(c: CallbackQuery, api: ApiClient) -> None:
-    _, _, bound, direction = c.data.split(":")
-    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
-    lower = float(cfg.get("lower_rsi", 40))
-    upper = float(cfg.get("upper_rsi", 60))
-    delta = 1.0 if direction == "up" else -1.0
-
-    if bound == "lower":
-        lower = max(5.0, min(45.0, lower + delta))
-        if lower >= upper:
-            await c.answer("Нижний RSI должен быть меньше верхнего", show_alert=True)
-            return
+    active = set(cfg.get("active_timeframes", []))
+    if tf in active:
+        active.remove(tf)
     else:
-        upper = max(55.0, min(95.0, upper + delta))
-        if upper <= lower:
-            await c.answer("Верхний RSI должен быть больше нижнего", show_alert=True)
-            return
+        active.add(tf)
+    if not active:
+        active.add("15m")
+    updated = sorted(active, key=lambda x: ["5m", "15m", "1h", "4h"].index(x))
+    await api.update_user_settings(chat_id=c.message.chat.id, active_timeframes=updated)
+    await c.message.edit_reply_markup(reply_markup=timeframes_kb(updated))
+    await c.answer()
 
-    await api.update_user_settings(chat_id=c.message.chat.id, lower_rsi=lower, upper_rsi=upper)
+
+@router.callback_query(F.data == "tfs:done", UserFlow.choosing_timeframe)
+async def tfs_done(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("RSI обновлен")
+    await c.answer("Таймфреймы обновлены")
+
+
+@router.callback_query(F.data == "settings:trigger")
+async def settings_trigger(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.entering_price_triggers)
+    await c.message.edit_text(
+        "Введите два числа через пробел:\n5m 15m (%)\n\nПример:\n2.5 4.5",
+        reply_markup=panel_actions_kb(),
+    )
+    await c.answer()
+
+
+@router.message(UserFlow.entering_price_triggers)
+async def handle_price_triggers(m: Message, state: FSMContext) -> None:
+    parts = m.text.strip().replace(",", ".").split()
+    if len(parts) != 2:
+        await m.answer("Нужно два числа через пробел. Пример: 2.5 4.5")
+        return
+    try:
+        pct_5m, pct_15m = float(parts[0]), float(parts[1])
+    except ValueError:
+        await m.answer("Не смог прочитать числа. Пример: 2.5 4.5")
+        return
+    await state.set_state(UserFlow.main)
+    await m.answer(
+        f"Сохраню в настройки (локально): 5m={pct_5m:.2f}%, 15m={pct_15m:.2f}%.\n"
+        "Пороги сигналов глобальные: 2.5% / 4.5%.",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "settings:rsi")
+async def settings_rsi(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.entering_rsi)
+    await c.message.edit_text(
+        "Введите RSI pump и dump через пробел\nПример:\n60 40",
+        reply_markup=panel_actions_kb(),
+    )
+    await c.answer()
+
+
+@router.message(UserFlow.entering_rsi)
+async def handle_rsi(m: Message, state: FSMContext, api: ApiClient) -> None:
+    parts = m.text.strip().split()
+    if len(parts) != 2:
+        await m.answer("Нужно два числа через пробел. Пример: 60 40")
+        return
+    try:
+        pump, dump = float(parts[0]), float(parts[1])
+    except ValueError:
+        await m.answer("Не смог прочитать числа. Пример: 60 40")
+        return
+    if pump <= dump:
+        await m.answer("RSI pump должен быть больше RSI dump")
+        return
+    await api.update_user_settings(chat_id=m.chat.id, upper_rsi=pump, lower_rsi=dump)
+    await state.set_state(UserFlow.main)
+    await m.answer(
+        f"RSI обновлён: pump ≥ {pump:.0f}, dump ≤ {dump:.0f}",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "settings:volume")
+async def settings_volume(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.entering_min_volume)
+    await c.message.edit_text(
+        "Введите минимальный объём 24h (можно K/M)\nПримеры:\n500K\n2M\n1000000",
+        reply_markup=panel_actions_kb(),
+    )
+    await c.answer()
+
+
+def _parse_volume(text: str) -> float | None:
+    t = text.strip().upper().replace(",", "")
+    mult = 1.0
+    if t.endswith("M"):
+        mult = 1_000_000
+        t = t[:-1]
+    elif t.endswith("K"):
+        mult = 1_000
+        t = t[:-1]
+    try:
+        return float(t) * mult
+    except ValueError:
+        return None
+
+
+@router.message(UserFlow.entering_min_volume)
+async def handle_volume(m: Message, state: FSMContext, api: ApiClient) -> None:
+    val = _parse_volume(m.text)
+    if val is None or val <= 0:
+        await m.answer("Не смог прочитать объём. Пример: 500K или 2M или 1000000")
+        return
+    await api.update_user_settings(chat_id=m.chat.id, min_quote_volume=val)
+    await state.set_state(UserFlow.main)
+    await m.answer(f"Мин. объём обновлён: ≥ ${val:,.0f}", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "settings:reset")
+async def settings_reset(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.confirming_reset)
+    await c.message.edit_text(
+        "Сбросить настройки на дефолт?\n2.5% / 4.5%, RSI 60/40, объём $500K, ТФ 15m",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Да", callback_data="reset:yes"),
+                    InlineKeyboardButton(text="Нет", callback_data="reset:no"),
+                ]
+            ]
+        ),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data == "reset:yes", UserFlow.confirming_reset)
+async def reset_yes(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    await api.update_user_settings(
+        chat_id=c.message.chat.id,
+        lower_rsi=40.0,
+        upper_rsi=60.0,
+        active_timeframes=["15m"],
+        min_quote_volume=500_000.0,
+    )
+    await state.set_state(UserFlow.main)
+    await _render_settings(c, api)
+    await c.answer("Сброшено")
+
+
+@router.callback_query(F.data == "reset:no", UserFlow.confirming_reset)
+async def reset_no(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    await state.set_state(UserFlow.main)
+    await _render_settings(c, api)
+    await c.answer("Отменено")
+
+
+@router.callback_query(F.data == "menu:info")
+async def menu_info(c: CallbackQuery) -> None:
+    text = (
+        "Информация\n\n"
+        "Бот отслеживает рынок Binance и отправляет поток Pump/Dump сигналов.\n"
+        "Чтобы получать сигналы чаще, включите больше таймфреймов в настройках."
+    )
+    await c.message.edit_text(text, reply_markup=panel_actions_kb())
+    await c.answer()
 
 @router.callback_query(F.data == "menu:info")
 async def menu_info(c: CallbackQuery) -> None:
