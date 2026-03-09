@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -14,6 +16,11 @@ TIMEFRAME_MAP: dict[str, str] = {
     "1h": "1h",
     "4h": "4h",
 }
+
+MAX_RETRIES = 2
+RETRY_BACKOFF = 1.5
+
+log = logging.getLogger(__name__)
 
 
 class BinanceCandlesError(RuntimeError):
@@ -52,6 +59,31 @@ def _window_change(closes: list[float], bars_back: int) -> float:
     return _pct_change(closes[-(bars_back + 1)], closes[-1])
 
 
+async def _request_with_retry(
+    url: str,
+    params: dict[str, Any],
+    *,
+    timeout: float = 10.0,
+    label: str = "",
+) -> httpx.Response:
+    last_exc: Exception | None = None
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                return resp
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+            last_exc = e
+            if attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF * (attempt + 1)
+                log.warning("Retry %d/%d %s: %s (wait %.1fs)", attempt + 1, MAX_RETRIES, label, e, wait)
+                await asyncio.sleep(wait)
+        except Exception as e:
+            raise BinanceCandlesError(f"{label}: {e}") from e
+    raise BinanceCandlesError(f"{label}: {last_exc}") from last_exc
+
+
 async def fetch_closes_and_volumes(
     *,
     symbol: str,
@@ -63,15 +95,11 @@ async def fetch_closes_and_volumes(
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
 
     pair = _to_binance_symbol(symbol)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                BINANCE_KLINES_URL,
-                params={"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
-            )
-            response.raise_for_status()
-    except Exception as e:
-        raise BinanceCandlesError(f"Failed to fetch klines for {symbol} {timeframe}: {e}") from e
+    response = await _request_with_retry(
+        BINANCE_KLINES_URL,
+        {"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
+        label=f"klines {symbol} {timeframe}",
+    )
 
     payload: list[list[Any]] = response.json()
     closes = [float(row[4]) for row in payload if len(row) > 5]
@@ -88,12 +116,11 @@ async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list
 
 async def fetch_quote_volume_24h(*, symbol: str) -> float:
     pair = _to_binance_symbol(symbol)
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(BINANCE_TICKER_24H_URL, params={"symbol": pair})
-            response.raise_for_status()
-    except Exception as e:
-        raise BinanceCandlesError(f"Failed to fetch 24h ticker for {symbol}: {e}") from e
+    response = await _request_with_retry(
+        BINANCE_TICKER_24H_URL,
+        {"symbol": pair},
+        label=f"24h ticker {symbol}",
+    )
     payload: dict[str, Any] = response.json()
     return float(payload.get("quoteVolume", 0.0) or 0.0)
 
@@ -102,12 +129,12 @@ async def fetch_quote_volume_24h_map(*, symbols: list[str]) -> dict[str, float]:
     if not symbols:
         return {}
     normalized = {_to_binance_symbol(symbol): symbol for symbol in symbols}
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(BINANCE_TICKER_24H_URL)
-            response.raise_for_status()
-    except Exception as e:
-        raise BinanceCandlesError(f"Failed to fetch 24h ticker map: {e}") from e
+    response = await _request_with_retry(
+        BINANCE_TICKER_24H_URL,
+        {},
+        timeout=15.0,
+        label="24h ticker map",
+    )
     payload: list[dict[str, Any]] = response.json()
     out: dict[str, float] = {}
     for row in payload:

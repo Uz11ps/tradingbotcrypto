@@ -12,9 +12,8 @@ from app.core.logging import setup_logging
 from app.services.binance_candles import (
     BinanceCandlesError,
     build_snapshot,
-    fetch_quote_volume_24h_map,
 )
-from app.services.binance_universe import BinanceUniverseError, fetch_spot_symbols
+from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
 from app.services.feed_formatter import format_signal_card
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.signal_filters import SignalFilterEngine
@@ -250,9 +249,13 @@ async def _run_rsi_mode(
     shard_count: int,
 ) -> None:
     try:
-        symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
+        universe = await fetch_top_symbols_by_volume(
+            quote_asset=settings.binance_quote_asset,
+            top_n=settings.feed_universe_size,
+            min_quote_volume_24h=settings.binance_min_quote_volume,
+        )
     except (BinanceUniverseError, Exception):
-        log.exception("Failed to load universe/settings in RSI mode")
+        log.exception("Failed to load universe in RSI mode")
         return
 
     try:
@@ -266,25 +269,20 @@ async def _run_rsi_mode(
         log.info("RSI mode: no target chats registered yet")
         return
 
-    if not symbols:
+    if not universe.symbols:
         log.warning("RSI mode: empty symbols list")
         return
 
-    batch_size = max(20, min(settings.feed_universe_size, len(symbols)))
-    selected = sorted(symbols)[:batch_size]
     shard_symbols = _select_shard_symbols(
-        selected,
+        universe.symbols,
         shard_index=shard_index,
         shard_count=shard_count,
     )
     if not shard_symbols:
         log.info("RSI mode: shard has no symbols (index=%s count=%s)", shard_index, shard_count)
         return
-    try:
-        volume_map = await fetch_quote_volume_24h_map(symbols=shard_symbols)
-    except BinanceCandlesError:
-        log.exception("Failed to fetch shared 24h volume map")
-        volume_map = {}
+    volume_map = universe.volume_map
+    log.info("RSI shard %d: %d symbols to scan", shard_index, len(shard_symbols))
 
     for chat_id in chat_ids:
         try:
@@ -338,6 +336,8 @@ async def _run_rsi_mode(
                 except (BinanceCandlesError, ValueError):
                     log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
                     continue
+                finally:
+                    await asyncio.sleep(0.08)
 
                 is_valid, reject_reason = validate_candidate_filters(
                     candidate,

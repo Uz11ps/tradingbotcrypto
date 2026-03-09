@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = 20
     worker_shard_index: int = 0
     worker_shard_count: int = 1
-    feed_universe_size: int = 100
+    feed_universe_size: int = 300
     feed_movers_limit: int = 20
     feed_min_change_pct: float = 2.5
     worker_feed_cooldown_seconds: int = 600

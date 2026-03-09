@@ -139,7 +139,7 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--api-port", default=8000, type=int, help="API published port")
     parser.add_argument("--postgres-port", default=5432, type=int, help="Postgres published port")
     parser.add_argument("--worker-interval-seconds", default=20, type=int, help="Worker loop interval")
-    parser.add_argument("--feed-universe-size", default=100, type=int, help="Universe size for movers feed")
+    parser.add_argument("--feed-universe-size", default=300, type=int, help="Universe size for movers feed")
     parser.add_argument("--feed-movers-limit", default=20, type=int, help="Maximum movers in feed")
     parser.add_argument("--feed-min-change-pct", default=2.5, type=float, help="Min 24h change for movers")
     parser.add_argument("--worker-feed-cooldown-seconds", default=600, type=int, help="Cooldown per coin for feed alerts")
