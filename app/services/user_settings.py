@@ -20,6 +20,7 @@ class EffectiveUserSettings:
     active_timeframes: list[str]
     min_price_move_pct: float
     min_quote_volume: float
+    price_change_15m_trigger_pct: float
 
 
 def _parse_tfs(raw: str | None) -> list[str]:
@@ -35,8 +36,9 @@ def get_global_defaults() -> EffectiveUserSettings:
         lower_rsi=float(settings.rsi_default_lower),
         upper_rsi=float(settings.rsi_default_upper),
         active_timeframes=_parse_tfs(settings.rsi_default_timeframes),
-        min_price_move_pct=float(settings.signal_min_abs_change_pct),
+        min_price_move_pct=float(settings.signal_price_change_5m_trigger_pct),
         min_quote_volume=float(settings.binance_min_quote_volume),
+        price_change_15m_trigger_pct=float(settings.signal_price_change_15m_trigger_pct),
     )
 
 
@@ -65,6 +67,7 @@ async def get_effective_settings(
         min_quote_volume=(
             float(row.min_quote_volume) if row.min_quote_volume is not None else defaults.min_quote_volume
         ),
+        price_change_15m_trigger_pct=defaults.price_change_15m_trigger_pct,
     )
 
 

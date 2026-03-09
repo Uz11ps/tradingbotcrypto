@@ -18,19 +18,25 @@ from app.bot.states import UserFlow
 router = Router()
 
 
-def _status_line(cfg: dict[str, object]) -> str:
+def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     tfs = " ".join(cfg.get("active_timeframes", [])) or "15m"
     rsi = f"{float(cfg.get('upper_rsi', 60)):.0f}/{float(cfg.get('lower_rsi', 40)):.0f}"
-    trigger = "2.5% / 4.5%"  # глобальные пороги
+    trigger = (
+        f"{float(cfg.get('min_price_move_pct', 1.5)):.1f}% / "
+        f"{settings.signal_price_change_15m_trigger_pct:.1f}%"
+    )
     feed_status = "Вкл"
-    return f"ТФ: {tfs} | Триггер: {trigger} | RSI: {rsi} | Лента: {feed_status}"
+    return (
+        f"ТФ: {tfs} | Триггер: {trigger} | RSI: {rsi} | "
+        f"Пары: {universe} (≥${min_vol/1_000_000:.1f}M) | Лента: {feed_status}"
+    )
 
 
-def _home_text(cfg: dict[str, object]) -> str:
+def _home_text(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     return (
         "Сигнальный бот\n\n"
         "Сканируем Binance и отправляем Pump/Dump сигналы.\n\n"
-        f"{_status_line(cfg)}"
+        f"{_status_line(cfg, universe=universe, min_vol=min_vol)}"
     )
 
 
@@ -38,21 +44,24 @@ def _settings_text(cfg: dict[str, object]) -> str:
     active = " ".join(cfg.get("active_timeframes", [])) or "15m"
     lower_rsi = float(cfg.get("lower_rsi", 40))
     upper_rsi = float(cfg.get("upper_rsi", 60))
-    min_vol = float(cfg.get("min_quote_volume", 500_000))
+    min_vol = float(cfg.get("min_quote_volume", settings.binance_min_quote_volume))
+    trigger_5m = float(cfg.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct))
+    trigger_15m = settings.signal_price_change_15m_trigger_pct
     return (
         "⚙️ Настройки сигналов\n\n"
         f"Таймфреймы: {active}\n"
         "Триггер цены:\n"
-        " 5m ≥ 2.5%\n"
-        " 15m ≥ 4.5%\n\n"
+        f" 5m ≥ {trigger_5m:.1f}%\n"
+        f" 15m ≥ {trigger_15m:.1f}%\n\n"
         f"RSI:\n pump ≥ {upper_rsi:.0f}\n dump ≤ {lower_rsi:.0f}\n\n"
         f"Мин. объём 24h:\n ≥ ${min_vol:,.0f}"
     )
 
 
 async def _render_home(target: Message | CallbackQuery, api: ApiClient) -> None:
-    cfg = await api.get_user_settings(chat_id=target.chat.id if isinstance(target, Message) else target.message.chat.id)
-    text = _home_text(cfg)
+    chat_id = target.chat.id if isinstance(target, Message) else target.message.chat.id
+    cfg = await api.get_user_settings(chat_id=chat_id)
+    text = _home_text(cfg, universe=settings.feed_universe_size, min_vol=float(cfg.get("min_quote_volume", settings.binance_min_quote_volume)))
     if isinstance(target, Message):
         await target.answer(text, reply_markup=main_menu_kb())
     else:
@@ -159,7 +168,7 @@ async def settings_trigger(c: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(UserFlow.entering_price_triggers)
-async def handle_price_triggers(m: Message, state: FSMContext) -> None:
+async def handle_price_triggers(m: Message, state: FSMContext, api: ApiClient) -> None:
     parts = m.text.strip().replace(",", ".").split()
     if len(parts) != 2:
         await m.answer("Нужно два числа через пробел. Пример: 2.5 4.5")
@@ -170,19 +179,14 @@ async def handle_price_triggers(m: Message, state: FSMContext) -> None:
         await m.answer("Не смог прочитать числа. Пример: 2.5 4.5")
         return
     await state.set_state(UserFlow.main)
-    # Сохраняем 5m в пользовательский порог (используется как минимальный порог цены).
-    # Порог 15m пока остаётся глобальным (4.5%).
     try:
-        api: ApiClient = m.bot["api_client"]  # type: ignore[index]
         await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=pct_5m)
-        saved = True
+        saved_5m = True
     except Exception:
-        saved = False
+        saved_5m = False
     await m.answer(
-        (
-            f"{'Сохранено' if saved else 'Не удалось сохранить'}: 5m={pct_5m:.2f}%."
-            f"\n15m сейчас остаётся 4.5%."
-        ),
+        f"{'Сохранено' if saved_5m else 'Не удалось сохранить'}: 5m={pct_5m:.2f}%."
+        f"\n15m сейчас: {settings.signal_price_change_15m_trigger_pct:.1f}%.",
         reply_markup=main_menu_kb(),
     )
 
