@@ -1,6 +1,43 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-09 14:05:00] Оптимизация цикла: modulo-sharding + общий anti-spam + меньше HTTP-запросов
+**Что сделано:**
+- Воркер переведен на modulo-шардирование:
+  - `WORKER_SHARD_COUNT`
+  - `WORKER_SHARD_INDEX`
+  - разбиение по формуле `index % count`.
+- Добавлен запуск 3 воркеров в `docker-compose`:
+  - `signal_worker_1` (`index=0`)
+  - `signal_worker_2` (`index=1`)
+  - `signal_worker_3` (`index=2`)
+- Anti-spam (`cooldown`) переведен в общий Redis-state, чтобы работать глобально между воркерами.
+- Убран дублирующий запрос свечей на символ:
+  - RSI теперь считается из свечей, уже полученных в `build_snapshot`.
+- 24h объемы переведены на общий батч-запрос:
+  - один вызов `/ticker/24hr` на шард,
+  - далее используется локальная карта `symbol -> quoteVolume`.
+
+**Зачем:**
+- Сократить время полного прохода universe.
+- Убрать повторные вычисления на той же монете.
+- Синхронизировать anti-spam между параллельными воркерами.
+
+**Файлы:**
+- `app/services/binance_candles.py`
+- `app/services/signal_filters.py`
+- `app/workers/mock_signal_worker.py`
+- `app/core/config.py`
+- `docker-compose.yml`
+- `scripts/deploy_server.py`
+- `tests/test_signal_filters.py`
+- `tests/test_worker_sharding.py`
+
+**Проверки:**
+- `ruff check .` -> `All checks passed`.
+- `pytest -q` -> `8 passed`.
+
+---
 ## [2026-03-09 13:20:00] Реализовано: минимальная логика сигналов (price -> RSI -> anti-spam)
 **Что изменено:**
 - Убрали `volume` из блокирующих условий сигнала.

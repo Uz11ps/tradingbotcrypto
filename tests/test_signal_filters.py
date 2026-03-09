@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.services.rsi_engine import evaluate_rsi_signal
 from app.services.signal_filters import SignalFilterEngine
 
@@ -27,13 +29,14 @@ def _candidate(*, current_price: float) -> object:
     return candidate
 
 
-def test_duplicate_is_not_blocked() -> None:
+@pytest.mark.asyncio
+async def test_duplicate_is_not_blocked() -> None:
     engine = SignalFilterEngine(cooldown_seconds=0, dedup_window_seconds=600, followup_move_pct=1.5)
     first = _candidate(current_price=102.0)
     second = _candidate(current_price=102.0)
 
-    ok1, reject1 = engine.accept(first, scope="chat")
-    ok2, reject2 = engine.accept(second, scope="chat")
+    ok1, reject1 = await engine.accept(first, scope="chat")
+    ok2, reject2 = await engine.accept(second, scope="chat")
 
     assert ok1 is True
     assert reject1 is None
@@ -41,13 +44,14 @@ def test_duplicate_is_not_blocked() -> None:
     assert reject2 is None
 
 
-def test_cooldown_bypassed_when_move_continues() -> None:
+@pytest.mark.asyncio
+async def test_cooldown_bypassed_when_move_continues() -> None:
     engine = SignalFilterEngine(cooldown_seconds=600, dedup_window_seconds=600, followup_move_pct=1.5)
     first = _candidate(current_price=100.0)
     followup = _candidate(current_price=102.0)  # +2% from previous signal price
 
-    ok1, reject1 = engine.accept(first, scope="chat")
-    ok2, reject2 = engine.accept(followup, scope="chat")
+    ok1, reject1 = await engine.accept(first, scope="chat")
+    ok2, reject2 = await engine.accept(followup, scope="chat")
 
     assert ok1 is True
     assert reject1 is None

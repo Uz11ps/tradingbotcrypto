@@ -9,7 +9,11 @@ from aiogram import Bot
 
 from app.core.config import settings
 from app.core.logging import setup_logging
-from app.services.binance_candles import BinanceCandlesError, build_snapshot, fetch_closes
+from app.services.binance_candles import (
+    BinanceCandlesError,
+    build_snapshot,
+    fetch_quote_volume_24h_map,
+)
 from app.services.binance_universe import BinanceUniverseError, fetch_spot_symbols
 from app.services.feed_formatter import format_signal_card
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
@@ -19,6 +23,11 @@ log = logging.getLogger("workers.mock_signal_worker")
 
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+
+
+def _select_shard_symbols(symbols: list[str], *, shard_index: int, shard_count: int) -> list[str]:
+    ordered = sorted(symbols)
+    return [symbol for i, symbol in enumerate(ordered) if i % shard_count == shard_index]
 
 
 def _fmt_signal_msg(s: dict[str, object]) -> str:
@@ -237,13 +246,14 @@ async def _run_rsi_mode(
     client: httpx.AsyncClient,
     bot: Bot,
     filters: SignalFilterEngine,
-    universe_cursor: int,
-) -> int:
+    shard_index: int,
+    shard_count: int,
+) -> None:
     try:
         symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
     except (BinanceUniverseError, Exception):
         log.exception("Failed to load universe/settings in RSI mode")
-        return universe_cursor
+        return
 
     try:
         chat_ids = await _list_signal_chats(client)
@@ -254,18 +264,27 @@ async def _run_rsi_mode(
         chat_ids = [settings.telegram_signals_chat_id]
     if not chat_ids:
         log.info("RSI mode: no target chats registered yet")
-        return universe_cursor
+        return
 
     if not symbols:
         log.warning("RSI mode: empty symbols list")
-        return universe_cursor
+        return
 
     batch_size = max(20, min(settings.feed_universe_size, len(symbols)))
-    start = universe_cursor % len(symbols)
-    selected = symbols[start : start + batch_size]
-    if len(selected) < batch_size:
-        selected.extend(symbols[: batch_size - len(selected)])
-    next_cursor = (start + batch_size) % len(symbols)
+    selected = sorted(symbols)[:batch_size]
+    shard_symbols = _select_shard_symbols(
+        selected,
+        shard_index=shard_index,
+        shard_count=shard_count,
+    )
+    if not shard_symbols:
+        log.info("RSI mode: shard has no symbols (index=%s count=%s)", shard_index, shard_count)
+        return
+    try:
+        volume_map = await fetch_quote_volume_24h_map(symbols=shard_symbols)
+    except BinanceCandlesError:
+        log.exception("Failed to fetch shared 24h volume map")
+        volume_map = {}
 
     for chat_id in chat_ids:
         try:
@@ -281,7 +300,7 @@ async def _run_rsi_mode(
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for timeframe in active_timeframes:
-            for symbol in selected:
+            for symbol in shard_symbols:
                 if sent_in_cycle >= max_signals_per_cycle:
                     break
                 try:
@@ -289,9 +308,9 @@ async def _run_rsi_mode(
                         symbol=symbol,
                         timeframe=timeframe,
                         volume_avg_window=settings.signal_volume_avg_window,
+                        quote_volume_24h=volume_map.get(symbol),
                     )
-                    closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
-                    rsi_value = compute_rsi(closes, period=settings.rsi_period)
+                    rsi_value = compute_rsi(snapshot.closes, period=settings.rsi_period)
                     candidate = evaluate_rsi_signal(
                         symbol=symbol,
                         timeframe=timeframe,
@@ -337,7 +356,7 @@ async def _run_rsi_mode(
                     )
                     continue
 
-                accepted, reject = filters.accept(candidate, scope=str(chat_id))
+                accepted, reject = await filters.accept(candidate, scope=str(chat_id))
                 if not accepted:
                     log.info(
                         "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
@@ -385,7 +404,7 @@ async def _run_rsi_mode(
                     continue
                 sent_in_cycle += 1
 
-    return next_cursor
+    return
 
 
 async def main() -> None:
@@ -402,13 +421,17 @@ async def main() -> None:
         cooldown_seconds=settings.worker_feed_cooldown_seconds,
         dedup_window_seconds=settings.signal_dedup_window_seconds,
         followup_move_pct=settings.signal_followup_move_pct,
+        redis_url=settings.redis_url,
+        redis_prefix=settings.signal_filter_redis_prefix,
     )
-    universe_cursor = 0
+    shard_count = max(1, settings.worker_shard_count)
+    shard_index = settings.worker_shard_index % shard_count
+    log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
 
     try:
         while True:
             if settings.signal_engine_mode == "rsi":
-                universe_cursor = await _run_rsi_mode(client, bot, filters, universe_cursor)
+                await _run_rsi_mode(client, bot, filters, shard_index, shard_count)
             else:
                 await _run_legacy_mode(client, bot)
 
@@ -416,6 +439,7 @@ async def main() -> None:
 
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:
+        await filters.aclose()
         await client.aclose()
         await bot.session.close()
 

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://127.0.0.1:6379/0"
     worker_interval_seconds: int = 20
+    worker_shard_index: int = 0
+    worker_shard_count: int = 1
     feed_universe_size: int = 100
     feed_movers_limit: int = 20
     feed_min_change_pct: float = 2.5
@@ -43,6 +45,7 @@ class Settings(BaseSettings):
     signal_volume_multiplier_strong: float = 1.2
     signal_strong_move_pct: float = 5.0
     signal_followup_move_pct: float = 1.5
+    signal_filter_redis_prefix: str = "signal_filter"
 
     log_level: str = "INFO"
 

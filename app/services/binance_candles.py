@@ -36,6 +36,7 @@ class CandleSnapshot:
     current_volume: float
     avg_volume_20: float
     quote_volume_24h: float
+    closes: list[float]
     generated_at: datetime
 
 
@@ -97,31 +98,61 @@ async def fetch_quote_volume_24h(*, symbol: str) -> float:
     return float(payload.get("quoteVolume", 0.0) or 0.0)
 
 
+async def fetch_quote_volume_24h_map(*, symbols: list[str]) -> dict[str, float]:
+    if not symbols:
+        return {}
+    normalized = {_to_binance_symbol(symbol): symbol for symbol in symbols}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(BINANCE_TICKER_24H_URL)
+            response.raise_for_status()
+    except Exception as e:
+        raise BinanceCandlesError(f"Failed to fetch 24h ticker map: {e}") from e
+    payload: list[dict[str, Any]] = response.json()
+    out: dict[str, float] = {}
+    for row in payload:
+        pair = str(row.get("symbol", ""))
+        if pair in normalized:
+            out[normalized[pair]] = float(row.get("quoteVolume", 0.0) or 0.0)
+    return out
+
+
 async def build_snapshot(
     *,
     symbol: str,
     timeframe: str,
     volume_avg_window: int = 20,
+    quote_volume_24h: float | None = None,
 ) -> CandleSnapshot:
     closes, volumes = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=100)
-    closes_5m, _ = await fetch_closes_and_volumes(symbol=symbol, timeframe="5m", limit=100)
-    quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
+    if quote_volume_24h is None:
+        quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
     prev_close = closes[-2]
     current_close = closes[-1]
     current_volume = volumes[-1]
     window = max(5, min(volume_avg_window, len(volumes)))
     avg_volume_20 = sum(volumes[-window:]) / window
+    if timeframe == "5m":
+        price_change_5m = _window_change(closes, 1)
+        price_change_15m = _window_change(closes, 3)
+    elif timeframe == "15m":
+        price_change_5m = 0.0
+        price_change_15m = _window_change(closes, 1)
+    else:
+        price_change_5m = 0.0
+        price_change_15m = _window_change(closes, 1)
     return CandleSnapshot(
         symbol=symbol,
         timeframe=timeframe,
         prev_close=prev_close,
         current_close=current_close,
         pct_change=_pct_change(prev_close, current_close),
-        price_change_5m=_window_change(closes_5m, 1),
-        price_change_15m=_window_change(closes_5m, 3),
+        price_change_5m=price_change_5m,
+        price_change_15m=price_change_15m,
         current_volume=current_volume,
         avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,
+        closes=closes,
         generated_at=datetime.now(tz=UTC),
     )
 

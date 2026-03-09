@@ -101,6 +101,9 @@ class Deployer:
             "SIGNAL_VOLUME_MULTIPLIER_STRONG=1.2\n"
             "SIGNAL_STRONG_MOVE_PCT=5.0\n"
             "SIGNAL_VOLUME_AVG_WINDOW=20\n"
+            "WORKER_SHARD_INDEX=0\n"
+            "WORKER_SHARD_COUNT=3\n"
+            "SIGNAL_FILTER_REDIS_PREFIX=signal_filter\n"
             f"API_PORT={self.cfg.api_port}\n"
             f"POSTGRES_PORT={self.cfg.postgres_port}\n"
         )
