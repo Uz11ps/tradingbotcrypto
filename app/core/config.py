@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     binance_quote_asset: str = "USDT"
     binance_min_quote_volume: float = 250000.0
     signal_dedup_window_seconds: int = 300
+    signal_min_abs_change_pct: float = 1.5
+    signal_volume_spike_multiplier: float = 2.0
+    signal_volume_avg_window: int = 20
 
     log_level: str = "INFO"
 

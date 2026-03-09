@@ -42,6 +42,8 @@ class RsiSignalCandidate:
     prev_price: float
     current_price: float
     pct_change: float
+    current_volume: float
+    avg_volume_20: float
     exchange: str
     trigger_source: str
     generated_at: datetime
@@ -57,6 +59,8 @@ def evaluate_rsi_signal(
     prev_price: float,
     current_price: float,
     pct_change: float,
+    current_volume: float,
+    avg_volume_20: float,
     generated_at: datetime,
 ) -> RsiSignalCandidate | None:
     if rsi_value >= upper:
@@ -74,8 +78,31 @@ def evaluate_rsi_signal(
         prev_price=prev_price,
         current_price=current_price,
         pct_change=round(pct_change, 4),
+        current_volume=current_volume,
+        avg_volume_20=avg_volume_20,
         exchange="Binance",
         trigger_source="rsi",
         generated_at=generated_at,
     )
+
+
+def validate_candidate_filters(
+    candidate: RsiSignalCandidate,
+    *,
+    min_abs_change_pct: float,
+    volume_spike_multiplier: float,
+) -> tuple[bool, str | None]:
+    if abs(candidate.pct_change) < min_abs_change_pct:
+        return False, "reject_min_move"
+
+    if candidate.signal_type == "pump" and candidate.pct_change <= 0:
+        return False, "reject_direction"
+    if candidate.signal_type == "dump" and candidate.pct_change >= 0:
+        return False, "reject_direction"
+
+    required_volume = candidate.avg_volume_20 * volume_spike_multiplier
+    if candidate.current_volume < required_volume:
+        return False, "reject_volume"
+
+    return True, None
 

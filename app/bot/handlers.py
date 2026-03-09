@@ -26,9 +26,14 @@ def _home_text() -> str:
 
 def _settings_text(cfg: dict[str, object]) -> str:
     active = ", ".join(cfg.get("active_timeframes", [])) or "15m"
+    min_price_move = float(cfg.get("min_price_move_pct", 1.5))
+    lower_rsi = float(cfg.get("lower_rsi", 25))
+    upper_rsi = float(cfg.get("upper_rsi", 75))
     return (
         "Настройки фильтрации\n\n"
         f"Таймфрейм для сигналов: {active}\n"
+        f"Процент отклонения: {min_price_move:.1f}%\n"
+        f"RSI: {lower_rsi:.0f}/{upper_rsi:.0f}\n"
         "Выберите один таймфрейм кнопками ниже."
     )
 
@@ -48,6 +53,9 @@ async def _render_settings(c: CallbackQuery, api: ApiClient) -> None:
         text,
         reply_markup=settings_kb(
             active_timeframes=list(cfg.get("active_timeframes", [])),
+            lower_rsi=float(cfg.get("lower_rsi", 25)),
+            upper_rsi=float(cfg.get("upper_rsi", 75)),
+            min_price_move_pct=float(cfg.get("min_price_move_pct", 1.5)),
         ),
     )
 
@@ -90,6 +98,43 @@ async def toggle_timeframe(c: CallbackQuery, api: ApiClient) -> None:
     await api.update_user_settings(chat_id=c.message.chat.id, active_timeframes=[tf])
     await _render_settings(c, api)
     await c.answer("Таймфрейм обновлен")
+
+
+@router.callback_query(F.data.startswith("settings:move:"))
+async def change_min_price_move(c: CallbackQuery, api: ApiClient) -> None:
+    direction = c.data.split(":")[-1]
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    current = float(cfg.get("min_price_move_pct", 1.5))
+    step = 0.5
+    updated = current + step if direction == "up" else current - step
+    updated = max(0.5, min(5.0, updated))
+    await api.update_user_settings(chat_id=c.message.chat.id, min_price_move_pct=updated)
+    await _render_settings(c, api)
+    await c.answer("Отклонение обновлено")
+
+
+@router.callback_query(F.data.startswith("settings:rsi:"))
+async def change_rsi(c: CallbackQuery, api: ApiClient) -> None:
+    _, _, bound, direction = c.data.split(":")
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    lower = float(cfg.get("lower_rsi", 25))
+    upper = float(cfg.get("upper_rsi", 75))
+    delta = 1.0 if direction == "up" else -1.0
+
+    if bound == "lower":
+        lower = max(5.0, min(45.0, lower + delta))
+        if lower >= upper:
+            await c.answer("Нижний RSI должен быть меньше верхнего", show_alert=True)
+            return
+    else:
+        upper = max(55.0, min(95.0, upper + delta))
+        if upper <= lower:
+            await c.answer("Верхний RSI должен быть больше нижнего", show_alert=True)
+            return
+
+    await api.update_user_settings(chat_id=c.message.chat.id, lower_rsi=lower, upper_rsi=upper)
+    await _render_settings(c, api)
+    await c.answer("RSI обновлен")
 
 @router.callback_query(F.data == "menu:info")
 async def menu_info(c: CallbackQuery) -> None:

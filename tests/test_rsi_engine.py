@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal
+from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 
 
 def test_compute_rsi_in_extreme_uptrend() -> None:
@@ -22,6 +22,8 @@ def test_evaluate_rsi_signal_pump_and_dump() -> None:
         prev_price=100.0,
         current_price=103.0,
         pct_change=3.0,
+        current_volume=250.0,
+        avg_volume_20=100.0,
         generated_at=ts,
     )
     dump = evaluate_rsi_signal(
@@ -33,6 +35,8 @@ def test_evaluate_rsi_signal_pump_and_dump() -> None:
         prev_price=100.0,
         current_price=97.0,
         pct_change=-3.0,
+        current_volume=250.0,
+        avg_volume_20=100.0,
         generated_at=ts,
     )
 
@@ -40,4 +44,29 @@ def test_evaluate_rsi_signal_pump_and_dump() -> None:
     assert dump is not None
     assert pump.signal_type == "pump"
     assert dump.signal_type == "dump"
+
+
+def test_validate_candidate_filters() -> None:
+    ts = datetime.now(tz=UTC)
+    candidate = evaluate_rsi_signal(
+        symbol="BTC/USDT",
+        timeframe="15m",
+        rsi_value=80.0,
+        lower=25.0,
+        upper=75.0,
+        prev_price=100.0,
+        current_price=101.6,
+        pct_change=1.6,
+        current_volume=250.0,
+        avg_volume_20=100.0,
+        generated_at=ts,
+    )
+    assert candidate is not None
+    ok, reason = validate_candidate_filters(
+        candidate,
+        min_abs_change_pct=1.5,
+        volume_spike_multiplier=2.0,
+    )
+    assert ok is True
+    assert reason is None
 

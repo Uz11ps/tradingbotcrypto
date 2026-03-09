@@ -53,7 +53,7 @@ from app.services.market_data import MarketDataError, fetch_market_snapshot
 from app.services.market_feed import MarketFeedError, fetch_top_movers
 from app.services.news_sentiment import NewsSentimentError, fetch_news_and_sentiment
 from app.services.performance import build_performance_stats
-from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal
+from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.user_settings import get_effective_settings, upsert_user_settings
 
 router = APIRouter()
@@ -89,7 +89,11 @@ async def feed_movers(
                 if timeframe not in TIMEFRAME_MAP:
                     continue
                 try:
-                    snapshot = await build_snapshot(symbol=symbol, timeframe=timeframe)
+                    snapshot = await build_snapshot(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        volume_avg_window=settings.signal_volume_avg_window,
+                    )
                     if snapshot.quote_volume_24h < effective.min_quote_volume:
                         continue
                     closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
@@ -103,9 +107,18 @@ async def feed_movers(
                         prev_price=snapshot.prev_close,
                         current_price=snapshot.current_close,
                         pct_change=snapshot.pct_change,
+                        current_volume=snapshot.current_volume,
+                        avg_volume_20=snapshot.avg_volume_20,
                         generated_at=snapshot.generated_at,
                     )
                     if not candidate:
+                        continue
+                    is_valid, _ = validate_candidate_filters(
+                        candidate,
+                        min_abs_change_pct=effective.min_price_move_pct,
+                        volume_spike_multiplier=settings.signal_volume_spike_multiplier,
+                    )
+                    if not is_valid:
                         continue
                     rows.append(
                         FeedMoverOut(
@@ -582,6 +595,7 @@ async def get_user_settings(
         lower_rsi=effective.lower_rsi,
         upper_rsi=effective.upper_rsi,
         active_timeframes=effective.active_timeframes,
+        min_price_move_pct=effective.min_price_move_pct,
         min_quote_volume=effective.min_quote_volume,
     )
 
@@ -598,6 +612,7 @@ async def update_user_settings(
         lower_rsi=payload.lower_rsi,
         upper_rsi=payload.upper_rsi,
         active_timeframes=payload.active_timeframes,
+        min_price_move_pct=payload.min_price_move_pct,
         min_quote_volume=payload.min_quote_volume,
     )
     return UserSignalSettingsOut(
@@ -605,6 +620,7 @@ async def update_user_settings(
         lower_rsi=effective.lower_rsi,
         upper_rsi=effective.upper_rsi,
         active_timeframes=effective.active_timeframes,
+        min_price_move_pct=effective.min_price_move_pct,
         min_quote_volume=effective.min_quote_volume,
     )
 

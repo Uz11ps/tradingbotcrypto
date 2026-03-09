@@ -18,6 +18,9 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 def settings_kb(
     *,
     active_timeframes: list[str],
+    lower_rsi: float,
+    upper_rsi: float,
+    min_price_move_pct: float,
 ) -> InlineKeyboardMarkup:
     def mark(tf: str) -> str:
         return ("✅ " if tf in active_timeframes else "⬜ ") + tf
@@ -31,6 +34,36 @@ def settings_kb(
             [
                 InlineKeyboardButton(text=mark("1h"), callback_data="settings:tf:1h"),
                 InlineKeyboardButton(text=mark("4h"), callback_data="settings:tf:4h"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"Отклонение - ({min_price_move_pct:.1f}%)",
+                    callback_data="settings:move:down",
+                ),
+                InlineKeyboardButton(
+                    text=f"Отклонение + ({min_price_move_pct:.1f}%)",
+                    callback_data="settings:move:up",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"RSI нижний - ({lower_rsi:.0f})",
+                    callback_data="settings:rsi:lower:down",
+                ),
+                InlineKeyboardButton(
+                    text=f"RSI нижний + ({lower_rsi:.0f})",
+                    callback_data="settings:rsi:lower:up",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"RSI верхний - ({upper_rsi:.0f})",
+                    callback_data="settings:rsi:upper:down",
+                ),
+                InlineKeyboardButton(
+                    text=f"RSI верхний + ({upper_rsi:.0f})",
+                    callback_data="settings:rsi:upper:up",
+                ),
             ],
             [InlineKeyboardButton(text="Главное меню", callback_data="menu:home")],
         ]

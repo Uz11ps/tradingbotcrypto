@@ -12,7 +12,7 @@ from app.core.logging import setup_logging
 from app.services.binance_candles import BinanceCandlesError, build_snapshot, fetch_closes
 from app.services.binance_universe import BinanceUniverseError, fetch_spot_symbols
 from app.services.feed_formatter import format_signal_card
-from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal
+from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.signal_filters import SignalFilterEngine
 
 log = logging.getLogger("workers.mock_signal_worker")
@@ -278,6 +278,9 @@ async def _run_rsi_mode(
         timeframe = active_timeframes[0]
         lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
         upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
+        min_price_move_pct = float(
+            effective.get("min_price_move_pct", settings.signal_min_abs_change_pct)
+        )
         min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
 
         sent_in_cycle = 0
@@ -286,7 +289,11 @@ async def _run_rsi_mode(
             if sent_in_cycle >= max_signals_per_cycle:
                 break
             try:
-                snapshot = await build_snapshot(symbol=symbol, timeframe=timeframe)
+                snapshot = await build_snapshot(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    volume_avg_window=settings.signal_volume_avg_window,
+                )
                 if snapshot.quote_volume_24h < min_quote_volume:
                     continue
                 closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
@@ -300,19 +307,52 @@ async def _run_rsi_mode(
                     prev_price=snapshot.prev_close,
                     current_price=snapshot.current_close,
                     pct_change=snapshot.pct_change,
+                    current_volume=snapshot.current_volume,
+                    avg_volume_20=snapshot.avg_volume_20,
                     generated_at=snapshot.generated_at,
                 )
                 if not candidate:
+                    log.info(
+                        "RSI reject: reject_rsi symbol=%s tf=%s rsi=%.2f lower=%.2f upper=%.2f",
+                        symbol,
+                        timeframe,
+                        rsi_value,
+                        lower_rsi,
+                        upper_rsi,
+                    )
                     continue
             except (BinanceCandlesError, ValueError):
                 log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
+                continue
+
+            is_valid, reject_reason = validate_candidate_filters(
+                candidate,
+                min_abs_change_pct=min_price_move_pct,
+                volume_spike_multiplier=settings.signal_volume_spike_multiplier,
+            )
+            if not is_valid:
+                log.info(
+                    "RSI reject: %s symbol=%s tf=%s pct_change=%.4f current_volume=%.4f avg20=%.4f",
+                    reject_reason,
+                    candidate.symbol,
+                    candidate.timeframe,
+                    candidate.pct_change,
+                    candidate.current_volume,
+                    candidate.avg_volume_20,
+                )
                 continue
 
             accepted, reject = filters.accept(candidate, scope=str(chat_id))
             if not accepted:
                 log.info(
                     "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
-                    reject.reason if reject else "unknown",
+                    (
+                        "reject_cooldown"
+                        if (reject and reject.reason == "cooldown")
+                        else "reject_duplicate"
+                        if (reject and reject.reason == "duplicate")
+                        else "unknown"
+                    ),
                     candidate.symbol,
                     candidate.timeframe,
                     candidate.signal_type,

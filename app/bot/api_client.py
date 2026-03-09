@@ -116,6 +116,7 @@ class ApiClient:
         lower_rsi: float | None = None,
         upper_rsi: float | None = None,
         active_timeframes: list[str] | None = None,
+        min_price_move_pct: float | None = None,
         min_quote_volume: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -125,6 +126,8 @@ class ApiClient:
             payload["upper_rsi"] = upper_rsi
         if active_timeframes is not None:
             payload["active_timeframes"] = active_timeframes
+        if min_price_move_pct is not None:
+            payload["min_price_move_pct"] = min_price_move_pct
         if min_quote_volume is not None:
             payload["min_quote_volume"] = min_quote_volume
         r = await self._client.post("/user-settings", params={"chat_id": chat_id}, json=payload)

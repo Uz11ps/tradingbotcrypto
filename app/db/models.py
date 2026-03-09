@@ -86,6 +86,7 @@ class UserSignalSettings(Base):
     lower_rsi: Mapped[float | None] = mapped_column(Float, nullable=True)
     upper_rsi: Mapped[float | None] = mapped_column(Float, nullable=True)
     active_timeframes: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    min_price_move_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_quote_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 

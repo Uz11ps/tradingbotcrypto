@@ -31,6 +31,8 @@ class CandleSnapshot:
     prev_close: float
     current_close: float
     pct_change: float
+    current_volume: float
+    avg_volume_20: float
     quote_volume_24h: float
     generated_at: datetime
 
@@ -41,7 +43,12 @@ def _pct_change(prev_value: float, current_value: float) -> float:
     return ((current_value - prev_value) / prev_value) * 100
 
 
-async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list[float]:
+async def fetch_closes_and_volumes(
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int = 100,
+) -> tuple[list[float], list[float]]:
     interval = TIMEFRAME_MAP.get(timeframe)
     if not interval:
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
@@ -58,9 +65,15 @@ async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list
         raise BinanceCandlesError(f"Failed to fetch klines for {symbol} {timeframe}: {e}") from e
 
     payload: list[list[Any]] = response.json()
-    closes = [float(row[4]) for row in payload if len(row) > 4]
-    if len(closes) < 30:
+    closes = [float(row[4]) for row in payload if len(row) > 5]
+    volumes = [float(row[5]) for row in payload if len(row) > 5]
+    if len(closes) < 30 or len(volumes) < 30:
         raise BinanceCandlesError(f"Not enough closes for {symbol} {timeframe}")
+    return closes, volumes
+
+
+async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list[float]:
+    closes, _ = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=limit)
     return closes
 
 
@@ -76,17 +89,27 @@ async def fetch_quote_volume_24h(*, symbol: str) -> float:
     return float(payload.get("quoteVolume", 0.0) or 0.0)
 
 
-async def build_snapshot(*, symbol: str, timeframe: str) -> CandleSnapshot:
-    closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
+async def build_snapshot(
+    *,
+    symbol: str,
+    timeframe: str,
+    volume_avg_window: int = 20,
+) -> CandleSnapshot:
+    closes, volumes = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=100)
     quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
     prev_close = closes[-2]
     current_close = closes[-1]
+    current_volume = volumes[-1]
+    window = max(5, min(volume_avg_window, len(volumes)))
+    avg_volume_20 = sum(volumes[-window:]) / window
     return CandleSnapshot(
         symbol=symbol,
         timeframe=timeframe,
         prev_close=prev_close,
         current_close=current_close,
         pct_change=_pct_change(prev_close, current_close),
+        current_volume=current_volume,
+        avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,
         generated_at=datetime.now(tz=UTC),
     )

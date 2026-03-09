@@ -154,6 +154,7 @@ class UserSignalSettingsUpdate(BaseModel):
     lower_rsi: float | None = None
     upper_rsi: float | None = None
     active_timeframes: list[str] | None = None
+    min_price_move_pct: float | None = None
     min_quote_volume: float | None = None
 
 
@@ -162,5 +163,6 @@ class UserSignalSettingsOut(BaseModel):
     lower_rsi: float
     upper_rsi: float
     active_timeframes: list[str]
+    min_price_move_pct: float
     min_quote_volume: float
 

@@ -18,6 +18,7 @@ class EffectiveUserSettings:
     lower_rsi: float
     upper_rsi: float
     active_timeframes: list[str]
+    min_price_move_pct: float
     min_quote_volume: float
 
 
@@ -34,6 +35,7 @@ def get_global_defaults() -> EffectiveUserSettings:
         lower_rsi=float(settings.rsi_default_lower),
         upper_rsi=float(settings.rsi_default_upper),
         active_timeframes=_parse_tfs(settings.rsi_default_timeframes),
+        min_price_move_pct=float(settings.signal_min_abs_change_pct),
         min_quote_volume=float(settings.binance_min_quote_volume),
     )
 
@@ -55,6 +57,11 @@ async def get_effective_settings(
         lower_rsi=float(row.lower_rsi) if row.lower_rsi is not None else defaults.lower_rsi,
         upper_rsi=float(row.upper_rsi) if row.upper_rsi is not None else defaults.upper_rsi,
         active_timeframes=_parse_tfs(row.active_timeframes) if row.active_timeframes else defaults.active_timeframes,
+        min_price_move_pct=(
+            float(row.min_price_move_pct)
+            if row.min_price_move_pct is not None
+            else defaults.min_price_move_pct
+        ),
         min_quote_volume=(
             float(row.min_quote_volume) if row.min_quote_volume is not None else defaults.min_quote_volume
         ),
@@ -68,6 +75,7 @@ async def upsert_user_settings(
     lower_rsi: float | None = None,
     upper_rsi: float | None = None,
     active_timeframes: list[str] | None = None,
+    min_price_move_pct: float | None = None,
     min_quote_volume: float | None = None,
 ) -> EffectiveUserSettings:
     row = await session.scalar(select(UserSignalSettings).where(UserSignalSettings.chat_id == chat_id))
@@ -81,6 +89,8 @@ async def upsert_user_settings(
         row.upper_rsi = float(upper_rsi)
     if active_timeframes is not None:
         row.active_timeframes = ",".join(tf for tf in active_timeframes if tf in ALLOWED_TFS)
+    if min_price_move_pct is not None:
+        row.min_price_move_pct = float(min_price_move_pct)
     if min_quote_volume is not None:
         row.min_quote_volume = float(min_quote_volume)
 

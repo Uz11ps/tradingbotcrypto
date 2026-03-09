@@ -16,4 +16,5 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS trigger_source VARCHAR(32)"))
         await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS rsi_value DOUBLE PRECISION"))
         await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS prev_price DOUBLE PRECISION"))
+        await conn.execute(text("ALTER TABLE user_signal_settings ADD COLUMN IF NOT EXISTS min_price_move_pct DOUBLE PRECISION"))
 
