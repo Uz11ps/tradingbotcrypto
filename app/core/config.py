@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     feed_universe_size: int = 300
     feed_movers_limit: int = 20
     feed_min_change_pct: float = 2.5
-    worker_feed_cooldown_seconds: int = 900
+    worker_feed_cooldown_seconds: int = 1800
     signal_engine_mode: str = "legacy"  # legacy | rsi
 
     rsi_default_lower: float = 40.0
@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     rsi_period: int = 14
 
     binance_quote_asset: str = "USDT"
-    binance_min_quote_volume: float = 500000.0
-    signal_dedup_window_seconds: int = 300
+    binance_min_quote_volume: float = 1000000.0
+    signal_dedup_window_seconds: int = 900
     signal_min_abs_change_pct: float = 1.5
     signal_volume_spike_multiplier: float = 2.0
     signal_volume_avg_window: int = 20

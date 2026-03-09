@@ -142,7 +142,7 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--feed-universe-size", default=300, type=int, help="Universe size for movers feed")
     parser.add_argument("--feed-movers-limit", default=20, type=int, help="Maximum movers in feed")
     parser.add_argument("--feed-min-change-pct", default=2.5, type=float, help="Min 24h change for movers")
-    parser.add_argument("--worker-feed-cooldown-seconds", default=900, type=int, help="Cooldown per coin for feed alerts")
+    parser.add_argument("--worker-feed-cooldown-seconds", default=1800, type=int, help="Cooldown per coin for feed alerts")
     args = parser.parse_args()
 
     return DeployConfig(

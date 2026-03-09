@@ -170,9 +170,19 @@ async def handle_price_triggers(m: Message, state: FSMContext) -> None:
         await m.answer("Не смог прочитать числа. Пример: 2.5 4.5")
         return
     await state.set_state(UserFlow.main)
+    # Сохраняем 5m в пользовательский порог (используется как минимальный порог цены).
+    # Порог 15m пока остаётся глобальным (4.5%).
+    try:
+        api: ApiClient = m.bot["api_client"]  # type: ignore[index]
+        await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=pct_5m)
+        saved = True
+    except Exception:
+        saved = False
     await m.answer(
-        f"Сохраню в настройки (локально): 5m={pct_5m:.2f}%, 15m={pct_15m:.2f}%.\n"
-        "Пороги сигналов глобальные: 2.5% / 4.5%.",
+        (
+            f"{'Сохранено' if saved else 'Не удалось сохранить'}: 5m={pct_5m:.2f}%."
+            f"\n15m сейчас остаётся 4.5%."
+        ),
         reply_markup=main_menu_kb(),
     )
 
