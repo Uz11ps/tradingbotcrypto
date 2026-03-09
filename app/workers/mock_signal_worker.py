@@ -295,6 +295,10 @@ async def _run_rsi_mode(
         # Keep RSI relaxed regardless of older per-chat strict values.
         lower_rsi = max(float(effective.get("lower_rsi", settings.rsi_default_lower)), 40.0)
         upper_rsi = min(float(effective.get("upper_rsi", settings.rsi_default_upper)), 60.0)
+        trigger_5m = float(effective.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct))
+        trigger_15m = float(
+            effective.get("price_change_15m_trigger_pct", settings.signal_price_change_15m_trigger_pct)
+        )
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for timeframe in active_timeframes:
@@ -315,8 +319,8 @@ async def _run_rsi_mode(
                         rsi_value=rsi_value,
                         price_change_5m=snapshot.price_change_5m,
                         price_change_15m=snapshot.price_change_15m,
-                        price_change_5m_trigger_pct=effective.min_price_move_pct,
-                        price_change_15m_trigger_pct=effective.price_change_15m_trigger_pct,
+                        price_change_5m_trigger_pct=trigger_5m,
+                        price_change_15m_trigger_pct=trigger_15m,
                         window_open_price=snapshot.window_open_price,
                         current_price=snapshot.current_close,
                         pct_change=snapshot.pct_change,
