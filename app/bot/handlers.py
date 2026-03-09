@@ -27,8 +27,8 @@ def _home_text() -> str:
 def _settings_text(cfg: dict[str, object]) -> str:
     active = ", ".join(cfg.get("active_timeframes", [])) or "15m"
     min_price_move = float(cfg.get("min_price_move_pct", 1.5))
-    lower_rsi = float(cfg.get("lower_rsi", 25))
-    upper_rsi = float(cfg.get("upper_rsi", 75))
+    lower_rsi = float(cfg.get("lower_rsi", 40))
+    upper_rsi = float(cfg.get("upper_rsi", 60))
     return (
         "Настройки фильтрации\n\n"
         f"Таймфрейм для сигналов: {active}\n"
@@ -53,8 +53,8 @@ async def _render_settings(c: CallbackQuery, api: ApiClient) -> None:
         text,
         reply_markup=settings_kb(
             active_timeframes=list(cfg.get("active_timeframes", [])),
-            lower_rsi=float(cfg.get("lower_rsi", 25)),
-            upper_rsi=float(cfg.get("upper_rsi", 75)),
+            lower_rsi=float(cfg.get("lower_rsi", 40)),
+            upper_rsi=float(cfg.get("upper_rsi", 60)),
             min_price_move_pct=float(cfg.get("min_price_move_pct", 1.5)),
         ),
     )
@@ -117,8 +117,8 @@ async def change_min_price_move(c: CallbackQuery, api: ApiClient) -> None:
 async def change_rsi(c: CallbackQuery, api: ApiClient) -> None:
     _, _, bound, direction = c.data.split(":")
     cfg = await api.get_user_settings(chat_id=c.message.chat.id)
-    lower = float(cfg.get("lower_rsi", 25))
-    upper = float(cfg.get("upper_rsi", 75))
+    lower = float(cfg.get("lower_rsi", 40))
+    upper = float(cfg.get("upper_rsi", 60))
     delta = 1.0 if direction == "up" else -1.0
 
     if bound == "lower":

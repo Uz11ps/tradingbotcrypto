@@ -94,8 +94,6 @@ async def feed_movers(
                         timeframe=timeframe,
                         volume_avg_window=settings.signal_volume_avg_window,
                     )
-                    if snapshot.quote_volume_24h < effective.min_quote_volume:
-                        continue
                     closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
                     rsi = compute_rsi(closes, period=settings.rsi_period)
                     candidate = evaluate_rsi_signal(
@@ -117,11 +115,8 @@ async def feed_movers(
                         continue
                     is_valid, _ = validate_candidate_filters(
                         candidate,
-                        lower_rsi=effective.lower_rsi,
-                        upper_rsi=effective.upper_rsi,
-                        volume_multiplier_base=settings.signal_volume_multiplier_base,
-                        volume_multiplier_strong=settings.signal_volume_multiplier_strong,
-                        strong_move_pct=settings.signal_strong_move_pct,
+                        lower_rsi=max(effective.lower_rsi, 40.0),
+                        upper_rsi=min(effective.upper_rsi, 60.0),
                     )
                     if not is_valid:
                         continue

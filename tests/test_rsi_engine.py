@@ -70,11 +70,8 @@ def test_validate_candidate_filters() -> None:
     assert candidate is not None
     ok, reason = validate_candidate_filters(
         candidate,
-        lower_rsi=25.0,
-        upper_rsi=75.0,
-        volume_multiplier_base=1.35,
-        volume_multiplier_strong=1.2,
-        strong_move_pct=5.0,
+        lower_rsi=40.0,
+        upper_rsi=60.0,
     )
     assert ok is True
     assert reason is None

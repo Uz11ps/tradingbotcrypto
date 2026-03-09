@@ -73,7 +73,11 @@ def evaluate_rsi_signal(
     if not (trigger_5m or trigger_15m):
         return None
 
-    dominant_change = price_change_15m if abs(price_change_15m) >= abs(price_change_5m) else price_change_5m
+    dominant_change = (
+        price_change_15m
+        if abs(price_change_15m) >= abs(price_change_5m)
+        else price_change_5m
+    )
     if dominant_change == 0:
         return None
     signal_type: SignalType = "pump" if dominant_change > 0 else "dump"
@@ -102,20 +106,10 @@ def validate_candidate_filters(
     *,
     lower_rsi: float,
     upper_rsi: float,
-    volume_multiplier_base: float,
-    volume_multiplier_strong: float,
-    strong_move_pct: float,
 ) -> tuple[bool, str | None]:
-    max_trigger_move = max(abs(candidate.price_change_5m), abs(candidate.price_change_15m))
-    multiplier = volume_multiplier_strong if max_trigger_move >= strong_move_pct else volume_multiplier_base
-    required_volume = candidate.avg_volume_20 * multiplier
-    if candidate.current_volume < required_volume:
-        return False, "reject_volume_dynamic"
-
     if candidate.signal_type == "pump" and candidate.rsi_value < upper_rsi:
         return False, "reject_rsi_filter"
     if candidate.signal_type == "dump" and candidate.rsi_value > lower_rsi:
         return False, "reject_rsi_filter"
 
     return True, None
-

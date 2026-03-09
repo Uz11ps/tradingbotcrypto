@@ -140,18 +140,6 @@ async def _list_signal_chats(client: httpx.AsyncClient) -> list[int]:
     return [int(x) for x in raw if int(x)]
 
 
-async def _context_is_weak(symbol: str, signal_type: str) -> bool:
-    checks: list[bool] = []
-    for tf in ("1h", "4h"):
-        closes = await fetch_closes(symbol=symbol, timeframe=tf, limit=100)
-        last_move = closes[-1] - closes[-2]
-        if signal_type == "pump":
-            checks.append(last_move > 0)
-        else:
-            checks.append(last_move < 0)
-    return not any(checks)
-
-
 async def _run_legacy_mode(
     client: httpx.AsyncClient,
     bot: Bot,
@@ -287,10 +275,9 @@ async def _run_rsi_mode(
             continue
 
         active_timeframes = list(effective.get("active_timeframes") or ["15m"])
-        lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
-        upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
-        min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
-
+        # Keep RSI relaxed regardless of older per-chat strict values.
+        lower_rsi = max(float(effective.get("lower_rsi", settings.rsi_default_lower)), 40.0)
+        upper_rsi = min(float(effective.get("upper_rsi", settings.rsi_default_upper)), 60.0)
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for timeframe in active_timeframes:
@@ -303,8 +290,6 @@ async def _run_rsi_mode(
                         timeframe=timeframe,
                         volume_avg_window=settings.signal_volume_avg_window,
                     )
-                    if snapshot.quote_volume_24h < min_quote_volume:
-                        continue
                     closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
                     rsi_value = compute_rsi(closes, period=settings.rsi_period)
                     candidate = evaluate_rsi_signal(
@@ -339,29 +324,18 @@ async def _run_rsi_mode(
                     candidate,
                     lower_rsi=lower_rsi,
                     upper_rsi=upper_rsi,
-                    volume_multiplier_base=settings.signal_volume_multiplier_base,
-                    volume_multiplier_strong=settings.signal_volume_multiplier_strong,
-                    strong_move_pct=settings.signal_strong_move_pct,
                 )
                 if not is_valid:
                     log.info(
-                        "RSI reject: %s symbol=%s tf=%s chg5m=%.4f chg15m=%.4f rsi=%.2f current_volume=%.4f avg20=%.4f",
+                        "RSI reject: %s symbol=%s tf=%s chg5m=%.4f chg15m=%.4f rsi=%.2f",
                         reject_reason,
                         candidate.symbol,
                         candidate.timeframe,
                         candidate.price_change_5m,
                         candidate.price_change_15m,
                         candidate.rsi_value,
-                        candidate.current_volume,
-                        candidate.avg_volume_20,
                     )
                     continue
-
-                weak_context = False
-                try:
-                    weak_context = await _context_is_weak(candidate.symbol, candidate.signal_type)
-                except Exception:
-                    log.exception("RSI context check failed for %s %s", candidate.symbol, candidate.timeframe)
 
                 accepted, reject = filters.accept(candidate, scope=str(chat_id))
                 if not accepted:
@@ -381,21 +355,12 @@ async def _run_rsi_mode(
                     )
                     continue
 
-                if weak_context:
-                    log.info(
-                        "RSI soft-filter: weak_context symbol=%s tf=%s signal_type=%s",
-                        candidate.symbol,
-                        candidate.timeframe,
-                        candidate.signal_type,
-                    )
-
-                reason_tail = " | weak_context" if weak_context else ""
                 payload = {
                     "symbol": candidate.symbol,
                     "timeframe": candidate.timeframe,
                     "direction": "up" if candidate.signal_type == "pump" else "down",
-                    "strength": 0.65 if weak_context else 1.0,
-                    "action": "watch" if weak_context else "entry",
+                    "strength": 1.0,
+                    "action": "entry",
                     "source": "cex",
                     "signal_type": candidate.signal_type,
                     "trigger_source": candidate.trigger_source,
@@ -403,7 +368,7 @@ async def _run_rsi_mode(
                     "prev_price": candidate.prev_price,
                     "price": candidate.current_price,
                     "volume": snapshot.quote_volume_24h,
-                    "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe}){reason_tail}",
+                    "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
                     "last_price": candidate.current_price,
                     "quote_volume": snapshot.quote_volume_24h,
                 }
@@ -413,8 +378,6 @@ async def _run_rsi_mode(
                     log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
                     continue
 
-                if weak_context:
-                    candidate.context_tag = "weak_context"
                 try:
                     await bot.send_message(chat_id, format_signal_card(candidate))
                 except Exception:
@@ -438,6 +401,7 @@ async def main() -> None:
     filters = SignalFilterEngine(
         cooldown_seconds=settings.worker_feed_cooldown_seconds,
         dedup_window_seconds=settings.signal_dedup_window_seconds,
+        followup_move_pct=settings.signal_followup_move_pct,
     )
     universe_cursor = 0
 

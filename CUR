@@ -1,6 +1,34 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-09 13:20:00] Реализовано: минимальная логика сигналов (price -> RSI -> anti-spam)
+**Что изменено:**
+- Убрали `volume` из блокирующих условий сигнала.
+- Основной триггер оставили только по цене:
+  - `abs(price_change_5m) >= 2.5%`
+  - `OR abs(price_change_15m) >= 4.5%`
+- RSI смягчен:
+  - `pump`: `RSI >= 60`
+  - `dump`: `RSI <= 40`
+- Убрали блокировку по `duplicate`.
+- Добавили повторный сигнал при продолжении движения:
+  - если цена ушла дальше минимум на `1.5%` от последнего сигнала, новый сигнал разрешен даже в cooldown.
+
+**Упрощенный pipeline:**
+- `price_trigger -> rsi_filter -> anti_spam(cooldown + followup_move) -> signal`
+
+**Технически по коду:**
+- `app/services/rsi_engine.py`: удален volume-check из `validate_candidate_filters`.
+- `app/services/signal_filters.py`: duplicate больше не отклоняет сигнал; добавлен `followup_move_pct`.
+- `app/workers/mock_signal_worker.py`: убраны `min_quote_volume` и `weak_context` этапы из блокирующей логики.
+- `app/api/router.py`: в `feed/movers` убран `min_quote_volume` фильтр.
+- `app/core/config.py`: дефолты RSI изменены на `40/60`, добавлен `signal_followup_move_pct=1.5`.
+
+**Проверки:**
+- `ruff check .` -> `All checks passed`.
+- `pytest -q` -> `7 passed`.
+
+---
 ## [2026-03-09 12:45:00] Реализовано: price-trigger pipeline + soft context + мягкие volume пороги
 **Что реализовано в коде:**
 - Перестроен pipeline сигнала в RSI режиме:
