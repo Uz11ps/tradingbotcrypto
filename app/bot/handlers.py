@@ -14,6 +14,7 @@ from app.bot.keyboards import (
     timeframes_kb,
 )
 from app.bot.states import UserFlow
+from app.core.config import settings
 
 router = Router()
 
