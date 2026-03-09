@@ -18,11 +18,12 @@ def _candidate(*, current_price: float) -> object:
         price_change_15m=4.6,
         price_change_5m_trigger_pct=2.5,
         price_change_15m_trigger_pct=4.5,
-        prev_price=100.0,
+        window_open_price=100.0,
         current_price=current_price,
         pct_change=2.7,
         current_volume=200.0,
         avg_volume_20=100.0,
+        quote_volume_24h=1_000_000.0,
         generated_at=ts,
     )
     assert candidate is not None

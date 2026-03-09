@@ -43,6 +43,7 @@ class CandleSnapshot:
     current_volume: float
     avg_volume_20: float
     quote_volume_24h: float
+    window_open_price: float
     closes: list[float]
     generated_at: datetime
 
@@ -162,12 +163,15 @@ async def build_snapshot(
     if timeframe == "5m":
         price_change_5m = _window_change(closes, 1)
         price_change_15m = _window_change(closes, 3)
+        window_open_price = closes[-4] if len(closes) >= 4 else closes[0]
     elif timeframe == "15m":
         price_change_5m = 0.0
         price_change_15m = _window_change(closes, 1)
+        window_open_price = closes[-2]
     else:
         price_change_5m = 0.0
         price_change_15m = _window_change(closes, 1)
+        window_open_price = closes[-2]
     return CandleSnapshot(
         symbol=symbol,
         timeframe=timeframe,
@@ -179,6 +183,7 @@ async def build_snapshot(
         current_volume=current_volume,
         avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,
+        window_open_price=window_open_price,
         closes=closes,
         generated_at=datetime.now(tz=UTC),
     )

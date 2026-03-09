@@ -46,6 +46,7 @@ class RsiSignalCandidate:
     price_change_15m: float
     current_volume: float
     avg_volume_20: float
+    quote_volume_24h: float
     exchange: str
     trigger_source: str
     context_tag: str | None
@@ -61,11 +62,12 @@ def evaluate_rsi_signal(
     price_change_15m: float,
     price_change_5m_trigger_pct: float,
     price_change_15m_trigger_pct: float,
-    prev_price: float,
+    window_open_price: float,
     current_price: float,
     pct_change: float,
     current_volume: float,
     avg_volume_20: float,
+    quote_volume_24h: float,
     generated_at: datetime,
 ) -> RsiSignalCandidate | None:
     trigger_5m = abs(price_change_5m) >= price_change_5m_trigger_pct
@@ -87,13 +89,14 @@ def evaluate_rsi_signal(
         timeframe=timeframe,
         signal_type=signal_type,
         rsi_value=round(rsi_value, 2),
-        prev_price=prev_price,
+        prev_price=window_open_price,
         current_price=current_price,
         pct_change=round(dominant_change, 4),
         price_change_5m=round(price_change_5m, 4),
         price_change_15m=round(price_change_15m, 4),
         current_volume=current_volume,
         avg_volume_20=avg_volume_20,
+        quote_volume_24h=quote_volume_24h,
         exchange="Binance",
         trigger_source="price_window",
         context_tag=None,

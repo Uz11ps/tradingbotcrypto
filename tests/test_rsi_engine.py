@@ -21,11 +21,12 @@ def test_evaluate_rsi_signal_pump_and_dump() -> None:
         price_change_15m=4.6,
         price_change_5m_trigger_pct=2.5,
         price_change_15m_trigger_pct=4.5,
-        prev_price=100.0,
+        window_open_price=100.0,
         current_price=103.0,
         pct_change=3.0,
         current_volume=250.0,
         avg_volume_20=100.0,
+        quote_volume_24h=1_000_000.0,
         generated_at=ts,
     )
     dump = evaluate_rsi_signal(
@@ -36,11 +37,12 @@ def test_evaluate_rsi_signal_pump_and_dump() -> None:
         price_change_15m=-4.8,
         price_change_5m_trigger_pct=2.5,
         price_change_15m_trigger_pct=4.5,
-        prev_price=100.0,
+        window_open_price=100.0,
         current_price=97.0,
         pct_change=-3.0,
         current_volume=250.0,
         avg_volume_20=100.0,
+        quote_volume_24h=1_000_000.0,
         generated_at=ts,
     )
 
@@ -60,11 +62,12 @@ def test_validate_candidate_filters() -> None:
         price_change_15m=4.7,
         price_change_5m_trigger_pct=2.5,
         price_change_15m_trigger_pct=4.5,
-        prev_price=100.0,
+        window_open_price=100.0,
         current_price=101.6,
         pct_change=1.6,
         current_volume=250.0,
         avg_volume_20=100.0,
+        quote_volume_24h=1_000_000.0,
         generated_at=ts,
     )
     assert candidate is not None
@@ -87,11 +90,12 @@ def test_reject_by_price_trigger() -> None:
         price_change_15m=3.9,
         price_change_5m_trigger_pct=2.5,
         price_change_15m_trigger_pct=4.5,
-        prev_price=100.0,
+        window_open_price=100.0,
         current_price=101.0,
         pct_change=1.0,
         current_volume=250.0,
         avg_volume_20=100.0,
+        quote_volume_24h=1_000_000.0,
         generated_at=ts,
     )
     assert candidate is None

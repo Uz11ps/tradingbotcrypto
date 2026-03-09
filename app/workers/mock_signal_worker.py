@@ -317,11 +317,12 @@ async def _run_rsi_mode(
                         price_change_15m=snapshot.price_change_15m,
                         price_change_5m_trigger_pct=settings.signal_price_change_5m_trigger_pct,
                         price_change_15m_trigger_pct=settings.signal_price_change_15m_trigger_pct,
-                        prev_price=snapshot.prev_close,
+                        window_open_price=snapshot.window_open_price,
                         current_price=snapshot.current_close,
                         pct_change=snapshot.pct_change,
                         current_volume=snapshot.current_volume,
                         avg_volume_20=snapshot.avg_volume_20,
+                        quote_volume_24h=snapshot.quote_volume_24h,
                         generated_at=snapshot.generated_at,
                     )
                     if not candidate:
