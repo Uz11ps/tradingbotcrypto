@@ -65,6 +65,14 @@ class SignalFilterEngine:
         last_price = self._last_sent_price.get(key, 0.0)
         moved_after_last_signal = self._pct_change(last_price, candidate.current_price)
 
+        fingerprint = self._fingerprint(candidate, scope)
+        last_fp_ts = self._last_fingerprint_at.get(fingerprint, 0.0)
+        if self.dedup_window_seconds and (now - last_fp_ts < self.dedup_window_seconds):
+            return False, RejectReason(
+                reason="duplicate",
+                details=f"fingerprint duplicate ts={last_fp_ts}",
+            )
+
         # Cooldown can be bypassed when movement continues strongly.
         if self.cooldown_seconds and (now - last_sent < self.cooldown_seconds) and (
             moved_after_last_signal < self.followup_move_pct
@@ -74,7 +82,6 @@ class SignalFilterEngine:
                 details=f"key={key} wait_left={int(self.cooldown_seconds - (now - last_sent))}s",
             )
 
-        fingerprint = self._fingerprint(candidate, scope)
         self._last_fingerprint_at[fingerprint] = now
 
         self._last_sent_at[key] = now
@@ -91,6 +98,15 @@ class SignalFilterEngine:
         now = time.time()
         key = self._cooldown_key(candidate, scope)
         cooldown_key = f"{self.redis_prefix}:cooldown:{'|'.join(key)}"
+        fingerprint = self._fingerprint(candidate, scope)
+        fingerprint_key = f"{self.redis_prefix}:fingerprint:{fingerprint}"
+
+        existing_fp_ts = await self._redis.get(fingerprint_key)
+        if existing_fp_ts:
+            return False, RejectReason(
+                reason="duplicate",
+                details="identical signal already sent (fingerprint exists)",
+            )
         state_raw = await self._redis.get(cooldown_key)
 
         if state_raw:
@@ -116,8 +132,6 @@ class SignalFilterEngine:
         await self._redis.set(cooldown_key, f"{now}|{candidate.current_price}", ex=ttl)
 
         # Keep fingerprint globally visible across workers.
-        fingerprint = self._fingerprint(candidate, scope)
-        fingerprint_key = f"{self.redis_prefix}:fingerprint:{fingerprint}"
         await self._redis.set(fingerprint_key, str(now), ex=max(self.dedup_window_seconds, 300))
         return True, None
 

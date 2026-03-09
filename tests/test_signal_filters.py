@@ -41,8 +41,9 @@ async def test_duplicate_is_not_blocked() -> None:
 
     assert ok1 is True
     assert reject1 is None
-    assert ok2 is True
-    assert reject2 is None
+    assert ok2 is False
+    assert reject2 is not None
+    assert reject2.reason == "duplicate"
 
 
 @pytest.mark.asyncio
