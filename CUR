@@ -1,0 +1,375 @@
+# CUR - Журнал системных изменений
+
+---
+## [2026-03-09 12:45:00] Реализовано: price-trigger pipeline + soft context + мягкие volume пороги
+**Что реализовано в коде:**
+- Перестроен pipeline сигнала в RSI режиме:
+  1) `price trigger` по окнам `5m/15m`
+  2) `dynamic volume filter`
+  3) `RSI` как фильтр по направлению
+  4) `cooldown/duplicate`
+- В snapshot добавлены новые поля:
+  - `price_change_5m`
+  - `price_change_15m`
+- Пороговые значения по умолчанию:
+  - `SIGNAL_PRICE_CHANGE_5M_TRIGGER_PCT=2.5`
+  - `SIGNAL_PRICE_CHANGE_15M_TRIGGER_PCT=4.5`
+  - `SIGNAL_VOLUME_MULTIPLIER_BASE=1.35`
+  - `SIGNAL_VOLUME_MULTIPLIER_STRONG=1.2`
+  - `SIGNAL_STRONG_MOVE_PCT=5.0`
+- `context` переведен в soft filter:
+  - при слабом контексте нет блокировки сигнала;
+  - ставится `weak_context`, снижаются `strength` и `action` до `watch`.
+
+**Логика фильтров (детали):**
+- Price trigger: `abs(price_change_5m) >= 2.5 OR abs(price_change_15m) >= 4.5`.
+- Dynamic volume:
+  - при сильном импульсе (`>= 5.0%`) используется `1.2 * avg20`;
+  - иначе `1.35 * avg20`.
+- RSI filter:
+  - для `pump`: `rsi >= upper`;
+  - для `dump`: `rsi <= lower`.
+
+**Reject и служебные статусы:**
+- Новые причины в логах:
+  - `reject_price_trigger`
+  - `reject_volume_dynamic`
+  - `reject_rsi_filter`
+- Soft status:
+  - `weak_context` (без hard reject).
+
+**Обновленные файлы:**
+- `app/services/binance_candles.py`
+- `app/services/rsi_engine.py`
+- `app/workers/mock_signal_worker.py`
+- `app/services/feed_formatter.py`
+- `app/api/router.py`
+- `app/core/config.py`
+- `scripts/deploy_server.py`
+- `tests/test_rsi_engine.py`
+
+**Проверки:**
+- `ruff check .` -> `All checks passed`.
+- `pytest -q` -> `5 passed`.
+
+---
+## [2026-03-09 12:20:00] Перед реализацией: уточнение параметров новой логики (по комментариям)
+**Что фиксируем перед внедрением:**
+- Переход на структуру `price trigger -> volume filter -> RSI filter` подтвержден.
+- Детекция движения по окнам времени остается:
+  - `price_change_5m_trigger_pct = 2.5`
+  - `price_change_15m_trigger_pct = 4.5`
+
+**Корректировки порогов (смягчение):**
+- `volume_multiplier_strong = 1.2` оставить без изменений.
+- `volume_multiplier_base` смягчить с `1.5` до `1.35` (рабочий диапазон обсуждался `1.3-1.4`).
+- `strong_move_pct` смягчить с `6.0` до `5.0` (рабочий диапазон обсуждался `4.5-5.0`).
+
+**Важное продуктовое решение по контексту:**
+- `context` не должен быть жестким стоп-фильтром на этом этапе.
+- Вместо `reject_context` используем мягкий режим:
+  - либо метка `weak_context`,
+  - либо понижение приоритета сигнала.
+- Цель текущего этапа: построить базовую рабочую логику, затем докручивать фильтры итеративно.
+
+**Примечание:**
+- Журнал продолжен (без перезаписи файла с нуля), запись добавлена как pre-implementation checkpoint.
+
+---
+## [2026-03-09 11:44:00] Реализовано: формула RSI+Price+Volume + настройки в боте
+**Что реализовано в коде:**
+- Внедрена формула сигнала:
+  - `PUMP`: `RSI >= upper`, `pct_change >= +1.5%`, `current_volume >= 2 * avg_volume(20)`.
+  - `DUMP`: `RSI <= lower`, `pct_change <= -1.5%`, `current_volume >= 2 * avg_volume(20)`.
+- Порядок фильтров в воркере:
+  1) RSI trigger
+  2) min price move
+  3) direction check
+  4) volume spike
+  5) cooldown
+  6) duplicate
+- Добавлены reject причины в логах:
+  - `reject_rsi`
+  - `reject_min_move`
+  - `reject_direction`
+  - `reject_volume`
+  - `reject_cooldown`
+  - `reject_duplicate`
+
+**Настройки внутри бота (UI):**
+- В экране `Настройки` добавлены пользовательские настройки:
+  - `Процент отклонения`
+  - `RSI` (нижний/верхний)
+  - выбор таймфрейма.
+- UI остается простым, без технических объяснений.
+
+**Конфиг добавлен:**
+- `SIGNAL_MIN_ABS_CHANGE_PCT=1.5`
+- `SIGNAL_VOLUME_SPIKE_MULTIPLIER=2.0`
+- `SIGNAL_VOLUME_AVG_WINDOW=20`
+
+**Технические изменения:**
+- Расширены данные свечей (текущий объем + средний объем окна).
+- Расширены пользовательские настройки (`min_price_move_pct`) в API/БД.
+- Обновлен deploy script: фиксирует `SIGNAL_ENGINE_MODE=rsi` и новые signal-флаги в `.env`.
+
+**Проверки:**
+- `ruff check .` -> `All checks passed`.
+- `pytest` -> `4 passed`.
+
+**Git и деплой:**
+- Изменения запушены в `main`: commit `1cd7ba2`.
+- Деплой выполнен успешно: `DEPLOY_OK`.
+
+---
+## [2026-03-08 18:05:00] Планируемые правки: RSI+Price+Volume и настройки в боте
+**Что внедряем:**
+- Модель сигнала: `RSI + Price + Volume`.
+- Формула:
+  - `PUMP`: `RSI >= upper`, `pct_change >= +1.5%`, `current_volume >= 2 * avg_volume(20)`.
+  - `DUMP`: `RSI <= lower`, `pct_change <= -1.5%`, `current_volume >= 2 * avg_volume(20)`.
+- Порядок фильтров:
+  1) RSI trigger
+  2) min price move
+  3) direction check
+  4) volume spike
+  5) cooldown
+  6) duplicate
+
+**Что добавляем:**
+- Reject причины в логах:
+  - `reject_rsi`
+  - `reject_min_move`
+  - `reject_direction`
+  - `reject_volume`
+  - `reject_cooldown`
+  - `reject_duplicate`
+- Конфиг:
+  - `SIGNAL_MIN_ABS_CHANGE_PCT=1.5`
+  - `SIGNAL_VOLUME_SPIKE_MULTIPLIER=2.0`
+  - `SIGNAL_VOLUME_AVG_WINDOW=20`
+- Настройки в боте (простой UI, без тех. объяснений):
+  - `Процент отклонения`
+  - `RSI`
+  - таймфрейм выбора сигнала.
+
+**UI правило:**
+- Не отправлять и не показывать:
+  - `PUMP -%`
+  - `DUMP +%`
+  - любые сигналы с движением `<1.5%`.
+
+---
+## [2026-03-08 17:41:00] Лента в этот же чат + единый таймфрейм по умолчанию
+**Проблема:**
+- Пользовательский сценарий требовал поток сигналов в тот же диалог с ботом (без отдельного канала/chat_id).
+- В настройках нужен выбор одного таймфрейма, дефолт `15m`.
+
+**Что изменено:**
+- `/start` теперь регистрирует текущий `chat_id` в пользовательских настройках для push-доставки.
+- Добавлен API endpoint `GET /user-settings/chats` для списка чатов, в которые слать поток.
+- `signal_worker` в режиме RSI рассылает сигналы по зарегистрированным чатам, с per-chat cooldown scope.
+- `menu:feed` сообщает, что поток идет в текущий чат.
+- Настройки переведены в single-timeframe режим: выбор одного ТФ (`5m/15m/1h/4h`), без мультивыбора.
+- Дефолтный ТФ изменен на `15m`.
+
+**Файлы:**
+- `app/bot/handlers.py`
+- `app/core/config.py`
+- `app/services/user_settings.py`
+- `app/services/signal_filters.py`
+- `app/api/router.py`
+- `app/workers/mock_signal_worker.py`
+
+**Проверки:**
+- `ruff check ...` -> `All checks passed`.
+- `python -m pytest -q` -> `3 passed`.
+
+---
+## [2026-03-08 17:24:30] Деплой UX push-only правок
+**Что сделано:**
+- Локальные UX-правки синхронизированы в git-клон и запушены в `origin/main`.
+- Коммит: `e5f996e` (`Simplify bot UX for push-only signal feed`).
+- Выполнен повторный деплой через `scripts/deploy_server.py`.
+
+**Результат:**
+- Деплой завершен успешно: `DEPLOY_OK`.
+- Контейнеры `api`, `bot`, `signal_worker`, `postgres`, `redis` в статусе `Up`.
+
+---
+## [2026-03-08 16:25:00] UX правки: push-only лента и чистые настройки
+**Что изменено:**
+- Упрощен экран `/start`: оставлен короткий пользовательский текст без технических деталей.
+- Кнопка `Лента` переведена в push-only поведение:
+  - больше не рендерит список сигналов в окне;
+  - показывает статус, что сигналы приходят потоком отдельными сообщениями.
+- Экран `Настройки` очищен от системной информации:
+  - оставлен только выбор активных таймфреймов;
+  - убраны кнопки и вывод RSI/min volume.
+- Раздел `Информация` упрощен до пользовательского описания без внутренней технической терминологии.
+
+**Файлы:**
+- `app/bot/handlers.py`
+- `app/bot/keyboards.py`
+
+**Проверки:**
+- `ruff check .` -> `All checks passed`.
+- `python -m pytest -q` -> `3 passed`.
+
+---
+## [2026-03-08 13:05:00] Деплой на сервер выполнен
+**Запуск:**
+- Выполнен `scripts/deploy_server.py` с локальной машины по SSH.
+- Предварительно установлена зависимость `paramiko` (иначе скрипт не стартовал).
+
+**Результат:**
+- Статус деплоя: `DEPLOY_OK`.
+- На сервере подняты контейнеры:
+  - `api` (порт `8000`)
+  - `bot`
+  - `signal_worker`
+  - `postgres` (порт `5432`, healthy)
+  - `redis` (порт `6379`, healthy)
+
+**Примечание:**
+- Скрипт деплоя подтягивает код из `repo-url` (`git pull` на сервере), а не копирует локальные файлы напрямую.
+
+---
+## [2026-03-06 12:58:00] Реализация RSI MVP (Stage 1-7) + автопроверка
+**Что реализовано:**
+- Stage 1: добавлен feature flag `SIGNAL_ENGINE_MODE` и конфиги RSI/Universe/anti-dup в `app/core/config.py`.
+- Stage 1: создан новый отдельный сервисный каркас:
+  - `app/services/binance_universe.py`
+  - `app/services/binance_candles.py`
+  - `app/services/rsi_engine.py`
+  - `app/services/signal_filters.py`
+  - `app/services/feed_formatter.py`
+  - `app/services/user_settings.py`
+- Stage 2-3: реализован полный Binance spot USDT universe и RSI сигналы (`>= upper -> pump`, `<= lower -> dump`) для `5m/15m/1h/4h`.
+- Stage 4: внедрен anti-spam:
+  - cooldown key = `(symbol, timeframe, signal_type)`;
+  - anti-duplicate fingerprint window.
+- Stage 5: расширены модели/схемы/API:
+  - `signals`: `signal_type`, `trigger_source`, `rsi_value`, `prev_price`;
+  - добавлена `user_signal_settings` для `global defaults + optional per-chat override`;
+  - добавлены `/user-settings` (GET/POST).
+- Stage 6: обновлен UI под MVP:
+  - главное меню: `Лента / Настройки / Информация`;
+  - карточка сигнала в формате MVP (без RSI в тексте, без сложных метрик);
+  - настройки: таймфреймы + RSI lower/upper + reset.
+- Stage 7: добавлено логирование reject-причин (`threshold`, `cooldown`, `duplicate`, `bad_data`) в воркере.
+- Добавлен smoke-тест `tests/test_rsi_engine.py`.
+
+**Совместимость и rollout:**
+- Legacy логика сохранена и работает при `SIGNAL_ENGINE_MODE=legacy`.
+- Новый RSI поток активируется переключением `SIGNAL_ENGINE_MODE=rsi`.
+
+**Проверки качества:**
+- `ruff check .` -> `All checks passed`.
+- `python -m pytest -q` -> `3 passed`.
+
+---
+## [2026-03-06 12:10:00] План внедрения RSI MVP (до начала правок)
+**Что делаем:**
+- Реализуем новый сценарий тестового сигнального бота с feature flag `SIGNAL_ENGINE_MODE = legacy | rsi`.
+- Внедряем новую модульную архитектуру без смешивания нового и legacy кода.
+- После каждого stage фиксируем checkpoint в отчете.
+
+**Зафиксированные продуктовые решения:**
+- Universe: все Binance spot пары с `quote=USDT` и `status=TRADING`.
+- RSI правила:
+  - `RSI >= upper` => `Pump`
+  - `RSI <= lower` => `Dump`
+- Таймфреймы: `5m`, `15m`, `1h`, `4h`.
+- Настройки: `global defaults + optional per-chat override`.
+- Cooldown ключ: `(symbol, timeframe, signal_type)`.
+- Daily counter: по `(symbol, signal_type)`.
+- Legacy логика сохраняется до полного переключения.
+
+**Новые сервисы (минимальная структура):**
+- `app/services/binance_universe.py`
+- `app/services/binance_candles.py`
+- `app/services/rsi_engine.py`
+- `app/services/signal_filters.py`
+- `app/services/feed_formatter.py`
+- `app/services/user_settings.py`
+
+**Stage порядок:**
+1. Stage 1 — feature flag + архитектурный каркас
+2. Stage 2 — полный Binance USDT universe
+3. Stage 3 — RSI engine + 4 таймфрейма
+4. Stage 4 — cooldown + anti-duplicate
+5. Stage 5 — обновление БД + настройки
+6. Stage 6 — новая карточка + упрощенное меню
+7. Stage 7 — логи + smoke tests + безопасный rollout
+
+**Ожидаемый результат:**
+- Новый RSI поток сигналов работает изолированно от legacy.
+- Переключение режима делается конфигом без переписывания кода.
+- UI показывает упрощенную карточку сигнала:
+  - эмодзи, монета, тип (PUMP/DUMP), % изменения, цена до/после, время.
+
+---
+## [2026-02-18 20:01:00] Уточнение логики AI Engine
+**Что делаем:** 
+- Уточнена механика работы AI Engine в `CUR`.
+
+**Как работает (уточнение):**
+- Бот использует **взвешенную сумму** факторов, а не прямой арбитраж между CEX и DEX.
+- `cex_strength` (сила тренда) и `dex_price_change_pct` (изменение цены за час на DEX) обрабатываются независимо.
+- Основная задача: подтверждение тренда одного источника данными из другого + учет сентимента новостей.
+
+**Файлы:**
+- `app/api/router.py`: здесь собираются данные из CEX и DEX.
+- `app/services/ai_engine.py`: здесь происходит расчет итогового скоринга.
+
+**Критерий успеха:**
+- В `CUR` зафиксировано, что система работает на основе гибридного скоринга, а не ценового арбитража.
+
+---
+## [2026-02-18 19:47:00] Анализ проекта и текущей логики
+**Что делаем:** 
+- Проведен полный разбор структуры и логики проекта.
+- Обновлен файл `CUR` (теперь записи добавляются сверху, язык — русский).
+
+**Описание логики:**
+Проект представляет собой комплексную систему для крипто-аналитики и генерации сигналов:
+1. **FastAPI Backend (`app/api/`):** Центральный узел. Обрабатывает запросы бота и воркера, управляет БД (PostgreSQL).
+2. **Telegram Bot (`app/bot/`):** Интерфейс пользователя на базе `aiogram`. Позволяет настраивать подписки и просматривать аналитику.
+3. **Mock Signal Worker (`app/workers/`):** Фоновый процесс. Каждые N секунд проверяет активные подписки, генерирует сигналы через API и рассылает их в Telegram.
+4. **AI Engine (`app/services/ai_engine.py`):** "Мозги" системы. Считает скоринг (entry/watch/hold) на основе:
+   - CEX strength (вес ~55%)
+   - DEX price change (вес ~25%)
+   - Sentiment (новости) (вес ~20%)
+   Имеет функцию `tune_strategy_from_history` для авто-подстройки порогов входа на основе винрейта и PnL.
+5. **Инфраструктура:** Docker-compose (App, Postgres, Redis). БД управляется через Alembic.
+
+**Системные аспекты:**
+- Переменные окружения хранятся в `.env` (загружаются через `pydantic-settings`).
+- Логирование настроено централизованно через `app/core/logging.py`.
+- Взаимодействие компонентов идет через HTTP (воркер -> API, бот -> API).
+
+**Файлы:**
+- `CUR`: системный журнал (этот файл).
+- `pyproject.toml`: зависимости проекта.
+- `app/core/config.py`: глобальные настройки.
+
+**Критерий успеха:**
+- Полное понимание структуры проекта для дальнейшей разработки.
+- Файл `CUR` корректно отображает текущее состояние и логику на русском языке.
+
+---
+## [2026-02-18 19:43:00] Initial Creation
+**Feature/Change:** 
+- Creation of the `CUR` system instruction and journal.
+- Initialization of the project logging structure.
+
+**How & Files:**
+- Created `CUR` in the root directory.
+- Added `CUR` to `.gitignore` to prevent it from being pushed to git.
+
+**Success Criteria:**
+- `CUR` file exists in root.
+- `CUR` is listed in `.gitignore`.
+- Future updates will follow this structure.
+---

@@ -140,6 +140,18 @@ async def _list_signal_chats(client: httpx.AsyncClient) -> list[int]:
     return [int(x) for x in raw if int(x)]
 
 
+async def _context_is_weak(symbol: str, signal_type: str) -> bool:
+    checks: list[bool] = []
+    for tf in ("1h", "4h"):
+        closes = await fetch_closes(symbol=symbol, timeframe=tf, limit=100)
+        last_move = closes[-1] - closes[-2]
+        if signal_type == "pump":
+            checks.append(last_move > 0)
+        else:
+            checks.append(last_move < 0)
+    return not any(checks)
+
+
 async def _run_legacy_mode(
     client: httpx.AsyncClient,
     bot: Bot,
@@ -275,120 +287,140 @@ async def _run_rsi_mode(
             continue
 
         active_timeframes = list(effective.get("active_timeframes") or ["15m"])
-        timeframe = active_timeframes[0]
         lower_rsi = float(effective.get("lower_rsi", settings.rsi_default_lower))
         upper_rsi = float(effective.get("upper_rsi", settings.rsi_default_upper))
-        min_price_move_pct = float(
-            effective.get("min_price_move_pct", settings.signal_min_abs_change_pct)
-        )
         min_quote_volume = float(effective.get("min_quote_volume", settings.binance_min_quote_volume))
 
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
-        for symbol in selected:
-            if sent_in_cycle >= max_signals_per_cycle:
-                break
-            try:
-                snapshot = await build_snapshot(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    volume_avg_window=settings.signal_volume_avg_window,
-                )
-                if snapshot.quote_volume_24h < min_quote_volume:
+        for timeframe in active_timeframes:
+            for symbol in selected:
+                if sent_in_cycle >= max_signals_per_cycle:
+                    break
+                try:
+                    snapshot = await build_snapshot(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        volume_avg_window=settings.signal_volume_avg_window,
+                    )
+                    if snapshot.quote_volume_24h < min_quote_volume:
+                        continue
+                    closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
+                    rsi_value = compute_rsi(closes, period=settings.rsi_period)
+                    candidate = evaluate_rsi_signal(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        rsi_value=rsi_value,
+                        price_change_5m=snapshot.price_change_5m,
+                        price_change_15m=snapshot.price_change_15m,
+                        price_change_5m_trigger_pct=settings.signal_price_change_5m_trigger_pct,
+                        price_change_15m_trigger_pct=settings.signal_price_change_15m_trigger_pct,
+                        prev_price=snapshot.prev_close,
+                        current_price=snapshot.current_close,
+                        pct_change=snapshot.pct_change,
+                        current_volume=snapshot.current_volume,
+                        avg_volume_20=snapshot.avg_volume_20,
+                        generated_at=snapshot.generated_at,
+                    )
+                    if not candidate:
+                        log.info(
+                            "RSI reject: reject_price_trigger symbol=%s tf=%s chg5m=%.4f chg15m=%.4f",
+                            symbol,
+                            timeframe,
+                            snapshot.price_change_5m,
+                            snapshot.price_change_15m,
+                        )
+                        continue
+                except (BinanceCandlesError, ValueError):
+                    log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
                     continue
-                closes = await fetch_closes(symbol=symbol, timeframe=timeframe, limit=100)
-                rsi_value = compute_rsi(closes, period=settings.rsi_period)
-                candidate = evaluate_rsi_signal(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    rsi_value=rsi_value,
-                    lower=lower_rsi,
-                    upper=upper_rsi,
-                    prev_price=snapshot.prev_close,
-                    current_price=snapshot.current_close,
-                    pct_change=snapshot.pct_change,
-                    current_volume=snapshot.current_volume,
-                    avg_volume_20=snapshot.avg_volume_20,
-                    generated_at=snapshot.generated_at,
+
+                is_valid, reject_reason = validate_candidate_filters(
+                    candidate,
+                    lower_rsi=lower_rsi,
+                    upper_rsi=upper_rsi,
+                    volume_multiplier_base=settings.signal_volume_multiplier_base,
+                    volume_multiplier_strong=settings.signal_volume_multiplier_strong,
+                    strong_move_pct=settings.signal_strong_move_pct,
                 )
-                if not candidate:
+                if not is_valid:
                     log.info(
-                        "RSI reject: reject_rsi symbol=%s tf=%s rsi=%.2f lower=%.2f upper=%.2f",
-                        symbol,
-                        timeframe,
-                        rsi_value,
-                        lower_rsi,
-                        upper_rsi,
+                        "RSI reject: %s symbol=%s tf=%s chg5m=%.4f chg15m=%.4f rsi=%.2f current_volume=%.4f avg20=%.4f",
+                        reject_reason,
+                        candidate.symbol,
+                        candidate.timeframe,
+                        candidate.price_change_5m,
+                        candidate.price_change_15m,
+                        candidate.rsi_value,
+                        candidate.current_volume,
+                        candidate.avg_volume_20,
                     )
                     continue
-            except (BinanceCandlesError, ValueError):
-                log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
-                continue
 
-            is_valid, reject_reason = validate_candidate_filters(
-                candidate,
-                min_abs_change_pct=min_price_move_pct,
-                volume_spike_multiplier=settings.signal_volume_spike_multiplier,
-            )
-            if not is_valid:
-                log.info(
-                    "RSI reject: %s symbol=%s tf=%s pct_change=%.4f current_volume=%.4f avg20=%.4f",
-                    reject_reason,
-                    candidate.symbol,
-                    candidate.timeframe,
-                    candidate.pct_change,
-                    candidate.current_volume,
-                    candidate.avg_volume_20,
-                )
-                continue
+                weak_context = False
+                try:
+                    weak_context = await _context_is_weak(candidate.symbol, candidate.signal_type)
+                except Exception:
+                    log.exception("RSI context check failed for %s %s", candidate.symbol, candidate.timeframe)
 
-            accepted, reject = filters.accept(candidate, scope=str(chat_id))
-            if not accepted:
-                log.info(
-                    "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
-                    (
-                        "reject_cooldown"
-                        if (reject and reject.reason == "cooldown")
-                        else "reject_duplicate"
-                        if (reject and reject.reason == "duplicate")
-                        else "unknown"
-                    ),
-                    candidate.symbol,
-                    candidate.timeframe,
-                    candidate.signal_type,
-                    reject.details if reject else "-",
-                )
-                continue
+                accepted, reject = filters.accept(candidate, scope=str(chat_id))
+                if not accepted:
+                    log.info(
+                        "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
+                        (
+                            "reject_cooldown"
+                            if (reject and reject.reason == "cooldown")
+                            else "reject_duplicate"
+                            if (reject and reject.reason == "duplicate")
+                            else "unknown"
+                        ),
+                        candidate.symbol,
+                        candidate.timeframe,
+                        candidate.signal_type,
+                        reject.details if reject else "-",
+                    )
+                    continue
 
-            payload = {
-                "symbol": candidate.symbol,
-                "timeframe": candidate.timeframe,
-                "direction": "up" if candidate.signal_type == "pump" else "down",
-                "strength": 1.0,
-                "action": "entry",
-                "source": "cex",
-                "signal_type": candidate.signal_type,
-                "trigger_source": candidate.trigger_source,
-                "rsi_value": candidate.rsi_value,
-                "prev_price": candidate.prev_price,
-                "price": candidate.current_price,
-                "volume": snapshot.quote_volume_24h,
-                "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
-                "last_price": candidate.current_price,
-                "quote_volume": snapshot.quote_volume_24h,
-            }
-            try:
-                await _save_feed_signal(client, payload)
-            except Exception:
-                log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
-                continue
+                if weak_context:
+                    log.info(
+                        "RSI soft-filter: weak_context symbol=%s tf=%s signal_type=%s",
+                        candidate.symbol,
+                        candidate.timeframe,
+                        candidate.signal_type,
+                    )
 
-            try:
-                await bot.send_message(chat_id, format_signal_card(candidate))
-            except Exception:
-                log.exception("Failed to send RSI feed alert for %s chat_id=%s", candidate.symbol, chat_id)
-                continue
-            sent_in_cycle += 1
+                reason_tail = " | weak_context" if weak_context else ""
+                payload = {
+                    "symbol": candidate.symbol,
+                    "timeframe": candidate.timeframe,
+                    "direction": "up" if candidate.signal_type == "pump" else "down",
+                    "strength": 0.65 if weak_context else 1.0,
+                    "action": "watch" if weak_context else "entry",
+                    "source": "cex",
+                    "signal_type": candidate.signal_type,
+                    "trigger_source": candidate.trigger_source,
+                    "rsi_value": candidate.rsi_value,
+                    "prev_price": candidate.prev_price,
+                    "price": candidate.current_price,
+                    "volume": snapshot.quote_volume_24h,
+                    "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe}){reason_tail}",
+                    "last_price": candidate.current_price,
+                    "quote_volume": snapshot.quote_volume_24h,
+                }
+                try:
+                    await _save_feed_signal(client, payload)
+                except Exception:
+                    log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
+                    continue
+
+                if weak_context:
+                    candidate.context_tag = "weak_context"
+                try:
+                    await bot.send_message(chat_id, format_signal_card(candidate))
+                except Exception:
+                    log.exception("Failed to send RSI feed alert for %s chat_id=%s", candidate.symbol, chat_id)
+                    continue
+                sent_in_cycle += 1
 
     return next_cursor
 

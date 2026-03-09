@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     signal_min_abs_change_pct: float = 1.5
     signal_volume_spike_multiplier: float = 2.0
     signal_volume_avg_window: int = 20
+    signal_price_change_5m_trigger_pct: float = 2.5
+    signal_price_change_15m_trigger_pct: float = 4.5
+    signal_volume_multiplier_base: float = 1.35
+    signal_volume_multiplier_strong: float = 1.2
+    signal_strong_move_pct: float = 5.0
 
     log_level: str = "INFO"
 

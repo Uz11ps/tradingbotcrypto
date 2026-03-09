@@ -31,6 +31,8 @@ class CandleSnapshot:
     prev_close: float
     current_close: float
     pct_change: float
+    price_change_5m: float
+    price_change_15m: float
     current_volume: float
     avg_volume_20: float
     quote_volume_24h: float
@@ -41,6 +43,12 @@ def _pct_change(prev_value: float, current_value: float) -> float:
     if prev_value == 0:
         return 0.0
     return ((current_value - prev_value) / prev_value) * 100
+
+
+def _window_change(closes: list[float], bars_back: int) -> float:
+    if len(closes) <= bars_back:
+        return 0.0
+    return _pct_change(closes[-(bars_back + 1)], closes[-1])
 
 
 async def fetch_closes_and_volumes(
@@ -96,6 +104,7 @@ async def build_snapshot(
     volume_avg_window: int = 20,
 ) -> CandleSnapshot:
     closes, volumes = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=100)
+    closes_5m, _ = await fetch_closes_and_volumes(symbol=symbol, timeframe="5m", limit=100)
     quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
     prev_close = closes[-2]
     current_close = closes[-1]
@@ -108,6 +117,8 @@ async def build_snapshot(
         prev_close=prev_close,
         current_close=current_close,
         pct_change=_pct_change(prev_close, current_close),
+        price_change_5m=_window_change(closes_5m, 1),
+        price_change_15m=_window_change(closes_5m, 3),
         current_volume=current_volume,
         avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,

@@ -42,10 +42,13 @@ class RsiSignalCandidate:
     prev_price: float
     current_price: float
     pct_change: float
+    price_change_5m: float
+    price_change_15m: float
     current_volume: float
     avg_volume_20: float
     exchange: str
     trigger_source: str
+    context_tag: str | None
     generated_at: datetime
 
 
@@ -54,8 +57,10 @@ def evaluate_rsi_signal(
     symbol: str,
     timeframe: str,
     rsi_value: float,
-    lower: float,
-    upper: float,
+    price_change_5m: float,
+    price_change_15m: float,
+    price_change_5m_trigger_pct: float,
+    price_change_15m_trigger_pct: float,
     prev_price: float,
     current_price: float,
     pct_change: float,
@@ -63,12 +68,15 @@ def evaluate_rsi_signal(
     avg_volume_20: float,
     generated_at: datetime,
 ) -> RsiSignalCandidate | None:
-    if rsi_value >= upper:
-        signal_type: SignalType = "pump"
-    elif rsi_value <= lower:
-        signal_type = "dump"
-    else:
+    trigger_5m = abs(price_change_5m) >= price_change_5m_trigger_pct
+    trigger_15m = abs(price_change_15m) >= price_change_15m_trigger_pct
+    if not (trigger_5m or trigger_15m):
         return None
+
+    dominant_change = price_change_15m if abs(price_change_15m) >= abs(price_change_5m) else price_change_5m
+    if dominant_change == 0:
+        return None
+    signal_type: SignalType = "pump" if dominant_change > 0 else "dump"
 
     return RsiSignalCandidate(
         symbol=symbol,
@@ -77,11 +85,14 @@ def evaluate_rsi_signal(
         rsi_value=round(rsi_value, 2),
         prev_price=prev_price,
         current_price=current_price,
-        pct_change=round(pct_change, 4),
+        pct_change=round(dominant_change, 4),
+        price_change_5m=round(price_change_5m, 4),
+        price_change_15m=round(price_change_15m, 4),
         current_volume=current_volume,
         avg_volume_20=avg_volume_20,
         exchange="Binance",
-        trigger_source="rsi",
+        trigger_source="price_window",
+        context_tag=None,
         generated_at=generated_at,
     )
 
@@ -89,20 +100,22 @@ def evaluate_rsi_signal(
 def validate_candidate_filters(
     candidate: RsiSignalCandidate,
     *,
-    min_abs_change_pct: float,
-    volume_spike_multiplier: float,
+    lower_rsi: float,
+    upper_rsi: float,
+    volume_multiplier_base: float,
+    volume_multiplier_strong: float,
+    strong_move_pct: float,
 ) -> tuple[bool, str | None]:
-    if abs(candidate.pct_change) < min_abs_change_pct:
-        return False, "reject_min_move"
-
-    if candidate.signal_type == "pump" and candidate.pct_change <= 0:
-        return False, "reject_direction"
-    if candidate.signal_type == "dump" and candidate.pct_change >= 0:
-        return False, "reject_direction"
-
-    required_volume = candidate.avg_volume_20 * volume_spike_multiplier
+    max_trigger_move = max(abs(candidate.price_change_5m), abs(candidate.price_change_15m))
+    multiplier = volume_multiplier_strong if max_trigger_move >= strong_move_pct else volume_multiplier_base
+    required_volume = candidate.avg_volume_20 * multiplier
     if candidate.current_volume < required_volume:
-        return False, "reject_volume"
+        return False, "reject_volume_dynamic"
+
+    if candidate.signal_type == "pump" and candidate.rsi_value < upper_rsi:
+        return False, "reject_rsi_filter"
+    if candidate.signal_type == "dump" and candidate.rsi_value > lower_rsi:
+        return False, "reject_rsi_filter"
 
     return True, None
 

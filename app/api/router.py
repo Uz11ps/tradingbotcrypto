@@ -102,8 +102,10 @@ async def feed_movers(
                         symbol=symbol,
                         timeframe=timeframe,
                         rsi_value=rsi,
-                        lower=effective.lower_rsi,
-                        upper=effective.upper_rsi,
+                        price_change_5m=snapshot.price_change_5m,
+                        price_change_15m=snapshot.price_change_15m,
+                        price_change_5m_trigger_pct=settings.signal_price_change_5m_trigger_pct,
+                        price_change_15m_trigger_pct=settings.signal_price_change_15m_trigger_pct,
                         prev_price=snapshot.prev_close,
                         current_price=snapshot.current_close,
                         pct_change=snapshot.pct_change,
@@ -115,8 +117,11 @@ async def feed_movers(
                         continue
                     is_valid, _ = validate_candidate_filters(
                         candidate,
-                        min_abs_change_pct=effective.min_price_move_pct,
-                        volume_spike_multiplier=settings.signal_volume_spike_multiplier,
+                        lower_rsi=effective.lower_rsi,
+                        upper_rsi=effective.upper_rsi,
+                        volume_multiplier_base=settings.signal_volume_multiplier_base,
+                        volume_multiplier_strong=settings.signal_volume_multiplier_strong,
+                        strong_move_pct=settings.signal_strong_move_pct,
                     )
                     if not is_valid:
                         continue
