@@ -37,11 +37,25 @@ def format_signal_card(candidate: RsiSignalCandidate) -> str:
         msk_time = ts.astimezone(MSK)
         ts_str = msk_time.strftime("%H:%M МСК")
     vol_str = _fmt_volume(candidate.quote_volume_24h)
+    div_type_map = {
+        "bullish": "бычья",
+        "bearish": "медвежья",
+        "hidden_bullish": "скрытая бычья",
+        "hidden_bearish": "скрытая медвежья",
+    }
+    if candidate.rsi_divergence_type and candidate.rsi_divergence_pct is not None:
+        div_text = (
+            f"{div_type_map.get(candidate.rsi_divergence_type, candidate.rsi_divergence_type)} "
+            f"{candidate.rsi_divergence_pct:.1f}%"
+        )
+    else:
+        div_text = "нет"
     return (
         f"{emoji} {candidate.symbol} ({candidate.timeframe})\n"
         f"{signal_label}: {candidate.pct_change:+.2f}%\n"
         f"Цена: {_smart_price(candidate.prev_price)} → {_smart_price(candidate.current_price)}\n"
         f"RSI: {candidate.rsi_value:.1f} | Объём 24h: {vol_str}\n"
+        f"Дивергенция RSI: {div_text}\n"
         f"Время: {ts_str}"
     )
 

@@ -37,7 +37,7 @@ def get_global_defaults() -> EffectiveUserSettings:
         upper_rsi=float(settings.rsi_default_upper),
         active_timeframes=_parse_tfs(settings.rsi_default_timeframes),
         min_price_move_pct=float(settings.signal_price_change_5m_trigger_pct),
-        min_quote_volume=float(settings.binance_min_quote_volume),
+        min_quote_volume=float(settings.bingx_min_quote_volume),
         price_change_15m_trigger_pct=float(settings.signal_price_change_15m_trigger_pct),
     )
 

@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     rsi_default_timeframes: str = "15m"
     rsi_period: int = 14
 
-    binance_quote_asset: str = "USDT"
-    binance_min_quote_volume: float = 1000000.0
+    bingx_quote_asset: str = "USDT"
+    bingx_min_quote_volume: float = 1000000.0
     signal_dedup_window_seconds: int = 900
     signal_min_abs_change_pct: float = 1.5
     signal_volume_spike_multiplier: float = 2.0
@@ -45,7 +45,11 @@ class Settings(BaseSettings):
     signal_volume_multiplier_strong: float = 1.2
     signal_strong_move_pct: float = 5.0
     signal_followup_move_pct: float = 1.5
+    signal_repeat_guard_min_move_pct: float = 0.4
+    signal_repeat_guard_min_rsi_delta: float = 2.0
     signal_filter_redis_prefix: str = "signal_filter"
+    signal_retention_days: int = 14
+    signal_retention_prune_interval_seconds: int = 3600
 
     log_level: str = "INFO"
 

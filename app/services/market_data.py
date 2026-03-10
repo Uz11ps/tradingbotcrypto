@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINGX_KLINES_URL = "https://open-api.bingx.com/openApi/spot/v1/market/kline"
 TIMEFRAME_MAP: dict[str, str] = {
     "1m": "1m",
     "5m": "5m",
@@ -22,8 +22,8 @@ class MarketDataError(RuntimeError):
     pass
 
 
-def _to_binance_symbol(symbol: str) -> str:
-    return symbol.replace("/", "").replace("-", "").upper()
+def _to_bingx_symbol(symbol: str) -> str:
+    return symbol.replace("/", "-").replace("_", "-").upper()
 
 
 def _validate_timeframe(timeframe: str) -> str:
@@ -56,15 +56,18 @@ async def fetch_market_snapshot(
     limit: int = 120,
 ) -> dict[str, Any]:
     interval = _validate_timeframe(timeframe)
-    pair = _to_binance_symbol(symbol)
+    pair = _to_bingx_symbol(symbol)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(
-            BINANCE_KLINES_URL,
+            BINGX_KLINES_URL,
             params={"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
         )
         response.raise_for_status()
-        klines: list[list[Any]] = response.json()
+        payload: dict[str, Any] = response.json()
+        if int(payload.get("code", -1)) != 0:
+            raise MarketDataError(f"BingX kline error: {payload}")
+        klines: list[list[Any]] = payload.get("data") or []
 
     if len(klines) < 30:
         raise MarketDataError("Not enough klines for analytics")

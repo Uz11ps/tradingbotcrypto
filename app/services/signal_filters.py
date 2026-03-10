@@ -22,17 +22,22 @@ class SignalFilterEngine:
         cooldown_seconds: int,
         dedup_window_seconds: int,
         followup_move_pct: float = 1.5,
+        repeat_guard_min_move_pct: float = 0.4,
+        repeat_guard_min_rsi_delta: float = 2.0,
         redis_url: str = "",
         redis_prefix: str = "signal_filter",
     ) -> None:
         self.cooldown_seconds = max(0, cooldown_seconds)
         self.dedup_window_seconds = max(0, dedup_window_seconds)
         self.followup_move_pct = max(0.0, followup_move_pct)
+        self.repeat_guard_min_move_pct = max(0.0, repeat_guard_min_move_pct)
+        self.repeat_guard_min_rsi_delta = max(0.0, repeat_guard_min_rsi_delta)
         self.redis_prefix = redis_prefix.strip() or "signal_filter"
         self._redis: Redis | None = Redis.from_url(redis_url, decode_responses=True) if redis_url else None
         self._last_sent_at: dict[tuple[str, str, str, str], float] = {}
         self._last_fingerprint_at: dict[str, float] = {}
         self._last_sent_price: dict[tuple[str, str, str, str], float] = {}
+        self._last_sent_rsi: dict[tuple[str, str, str, str], float] = {}
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -63,7 +68,9 @@ class SignalFilterEngine:
         key = self._cooldown_key(candidate, scope)
         last_sent = self._last_sent_at.get(key, 0.0)
         last_price = self._last_sent_price.get(key, 0.0)
+        last_rsi = self._last_sent_rsi.get(key, candidate.rsi_value)
         moved_after_last_signal = self._pct_change(last_price, candidate.current_price)
+        rsi_delta = abs(candidate.rsi_value - last_rsi)
 
         fingerprint = self._fingerprint(candidate, scope)
         last_fp_ts = self._last_fingerprint_at.get(fingerprint, 0.0)
@@ -82,10 +89,25 @@ class SignalFilterEngine:
                 details=f"key={key} wait_left={int(self.cooldown_seconds - (now - last_sent))}s",
             )
 
+        # Even after cooldown, reject stale repeats with nearly unchanged price and RSI.
+        if (
+            last_sent > 0
+            and moved_after_last_signal < self.repeat_guard_min_move_pct
+            and rsi_delta < self.repeat_guard_min_rsi_delta
+        ):
+            return False, RejectReason(
+                reason="stale_repeat",
+                details=(
+                    f"key={key} move={moved_after_last_signal:.4f}% "
+                    f"rsi_delta={rsi_delta:.2f}"
+                ),
+            )
+
         self._last_fingerprint_at[fingerprint] = now
 
         self._last_sent_at[key] = now
         self._last_sent_price[key] = candidate.current_price
+        self._last_sent_rsi[key] = candidate.rsi_value
         return True, None
 
     async def _accept_redis(
@@ -109,15 +131,22 @@ class SignalFilterEngine:
             )
         state_raw = await self._redis.get(cooldown_key)
 
+        prev_rsi = candidate.rsi_value
         if state_raw:
             try:
-                prev_ts_s, prev_price_s = state_raw.split("|", maxsplit=1)
+                parts = state_raw.split("|")
+                prev_ts_s = parts[0]
+                prev_price_s = parts[1] if len(parts) > 1 else "0"
+                prev_rsi_s = parts[2] if len(parts) > 2 else str(candidate.rsi_value)
                 prev_ts = float(prev_ts_s)
                 prev_price = float(prev_price_s)
+                prev_rsi = float(prev_rsi_s)
             except ValueError:
                 prev_ts = 0.0
                 prev_price = 0.0
+                prev_rsi = candidate.rsi_value
             moved_after_last_signal = self._pct_change(prev_price, candidate.current_price)
+            rsi_delta = abs(candidate.rsi_value - prev_rsi)
             if self.cooldown_seconds and (now - prev_ts < self.cooldown_seconds) and (
                 moved_after_last_signal < self.followup_move_pct
             ):
@@ -127,9 +156,21 @@ class SignalFilterEngine:
                         f"key={key} wait_left={int(self.cooldown_seconds - (now - prev_ts))}s"
                     ),
                 )
+            if (
+                prev_ts > 0
+                and moved_after_last_signal < self.repeat_guard_min_move_pct
+                and rsi_delta < self.repeat_guard_min_rsi_delta
+            ):
+                return False, RejectReason(
+                    reason="stale_repeat",
+                    details=(
+                        f"key={key} move={moved_after_last_signal:.4f}% "
+                        f"rsi_delta={rsi_delta:.2f}"
+                    ),
+                )
 
         ttl = max(self.cooldown_seconds, self.dedup_window_seconds, 3600)
-        await self._redis.set(cooldown_key, f"{now}|{candidate.current_price}", ex=ttl)
+        await self._redis.set(cooldown_key, f"{now}|{candidate.current_price}|{candidate.rsi_value}", ex=ttl)
 
         # Keep fingerprint globally visible across workers.
         await self._redis.set(fingerprint_key, str(now), ex=max(self.dedup_window_seconds, 300))

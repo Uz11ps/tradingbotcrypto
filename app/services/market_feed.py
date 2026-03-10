@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from math import log10
 from typing import Any
 
 import httpx
 
-BINANCE_TICKER_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
-LEVERAGED_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
+BINGX_TICKER_24H_URL = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
+LEVERAGED_SUFFIXES = ("UP-USDT", "DOWN-USDT", "BULL-USDT", "BEAR-USDT")
 
 
 class MarketFeedError(RuntimeError):
@@ -15,13 +16,13 @@ class MarketFeedError(RuntimeError):
 
 
 def _to_human_symbol(raw: str) -> str:
-    if raw.endswith("USDT"):
-        return f"{raw[:-4]}/USDT"
+    if raw.endswith("-USDT"):
+        return f"{raw[:-5]}/USDT"
     return raw
 
 
 def _is_spot_usdt_symbol(raw: str) -> bool:
-    return raw.endswith("USDT") and not raw.endswith(LEVERAGED_SUFFIXES)
+    return raw.endswith("-USDT") and not raw.endswith(LEVERAGED_SUFFIXES)
 
 
 def _strength(price_change_pct: float, quote_volume: float) -> float:
@@ -38,9 +39,15 @@ async def fetch_top_movers(
     min_abs_change_pct: float = 2.5,
 ) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=12.0) as client:
-        response = await client.get(BINANCE_TICKER_24H_URL)
+        response = await client.get(
+            BINGX_TICKER_24H_URL,
+            params={"timestamp": int(time.time() * 1000)},
+        )
         response.raise_for_status()
-        payload: list[dict[str, Any]] = response.json()
+        raw_payload: dict[str, Any] = response.json()
+        if int(raw_payload.get("code", -1)) != 0:
+            raise MarketFeedError(f"BingX ticker error: {raw_payload}")
+        payload: list[dict[str, Any]] = raw_payload.get("data") or []
 
     if not payload:
         raise MarketFeedError("Ticker data is empty")
@@ -55,7 +62,8 @@ async def fetch_top_movers(
 
     movers: list[dict[str, Any]] = []
     for item in universe:
-        change_pct = float(item.get("priceChangePercent", 0.0) or 0.0)
+        pct_raw = str(item.get("priceChangePercent", "0")).replace("%", "")
+        change_pct = float(pct_raw or 0.0)
         if abs(change_pct) < min_abs_change_pct:
             continue
         quote_volume = float(item.get("quoteVolume", 0.0) or 0.0)

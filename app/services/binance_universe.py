@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-BINANCE_TICKER_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
-LEVERAGED_SUFFIXES = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
+BINGX_SYMBOLS_URL = "https://open-api.bingx.com/openApi/spot/v1/common/symbols"
+BINGX_TICKER_24H_URL = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
+LEVERAGED_SUFFIXES = ("UP-USDT", "DOWN-USDT", "BULL-USDT", "BEAR-USDT")
 
 log = logging.getLogger(__name__)
 
@@ -28,43 +29,48 @@ def _is_leveraged(symbol: str) -> bool:
 
 
 def _to_human_symbol(raw: str) -> str:
-    if raw.endswith("USDT"):
-        return f"{raw[:-4]}/USDT"
+    if raw.endswith("-USDT"):
+        return f"{raw[:-5]}/USDT"
     return raw
 
 
 async def fetch_spot_symbols(*, quote_asset: str = "USDT") -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            response = await client.get(BINANCE_EXCHANGE_INFO_URL)
+            response = await client.get(
+                BINGX_SYMBOLS_URL,
+                params={"timestamp": int(time.time() * 1000)},
+            )
             response.raise_for_status()
     except Exception as e:
-        raise BinanceUniverseError(f"Failed to load exchangeInfo: {e}") from e
+        raise BinanceUniverseError(f"Failed to load BingX symbols: {e}") from e
 
     payload: dict[str, Any] = response.json()
-    symbols = payload.get("symbols", [])
+    if int(payload.get("code", -1)) != 0:
+        raise BinanceUniverseError(f"BingX symbols error: {payload}")
+    symbols = (payload.get("data") or {}).get("symbols", [])
     if not isinstance(symbols, list):
-        raise BinanceUniverseError("Invalid exchangeInfo payload: symbols is not a list")
+        raise BinanceUniverseError("Invalid BingX symbols payload: symbols is not a list")
 
     result: list[str] = []
     for row in symbols:
         if not isinstance(row, dict):
             continue
-        if row.get("status") != "TRADING":
+        if int(row.get("status", 0)) != 0:
             continue
-        if row.get("isSpotTradingAllowed") is False:
+        if not bool(row.get("apiStateBuy", True)) and not bool(row.get("apiStateSell", True)):
             continue
         raw_symbol = str(row.get("symbol", ""))
         if not raw_symbol:
             continue
-        if str(row.get("quoteAsset", "")).upper() != quote_asset.upper():
+        if not raw_symbol.endswith(f"-{quote_asset.upper()}"):
             continue
         if _is_leveraged(raw_symbol):
             continue
         result.append(_to_human_symbol(raw_symbol))
 
     if not result:
-        raise BinanceUniverseError("No tradable symbols found in Binance universe")
+        raise BinanceUniverseError("No tradable symbols found in BingX universe")
     return sorted(set(result))
 
 
@@ -74,20 +80,26 @@ async def fetch_top_symbols_by_volume(
     top_n: int = 300,
     min_quote_volume_24h: float = 500_000.0,
 ) -> UniverseSnapshot:
-    """One /ticker/24hr call → top-N USDT pairs by 24h quoteVolume.
+    """One ticker call -> top-N pairs by 24h quoteVolume.
 
     Returns both the ranked symbol list and volume map (reusable by workers).
     """
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(BINANCE_TICKER_24H_URL)
+            response = await client.get(
+                BINGX_TICKER_24H_URL,
+                params={"timestamp": int(time.time() * 1000)},
+            )
             response.raise_for_status()
     except Exception as e:
-        raise BinanceUniverseError(f"Failed to fetch ticker/24hr: {e}") from e
+        raise BinanceUniverseError(f"Failed to fetch BingX ticker/24hr: {e}") from e
 
-    tickers: list[dict[str, Any]] = response.json()
+    payload: dict[str, Any] = response.json()
+    if int(payload.get("code", -1)) != 0:
+        raise BinanceUniverseError(f"BingX ticker/24hr error: {payload}")
+    tickers: list[dict[str, Any]] = payload.get("data") or []
 
-    suffix = quote_asset.upper()
+    suffix = f"-{quote_asset.upper()}"
     ranked: list[tuple[str, float]] = []
     for t in tickers:
         raw = str(t.get("symbol", ""))

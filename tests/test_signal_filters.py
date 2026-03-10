@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -59,3 +60,27 @@ async def test_cooldown_bypassed_when_move_continues() -> None:
     assert reject1 is None
     assert ok2 is True
     assert reject2 is None
+
+
+@pytest.mark.asyncio
+async def test_stale_repeat_blocked_even_after_cooldown() -> None:
+    engine = SignalFilterEngine(
+        cooldown_seconds=1,
+        dedup_window_seconds=1,
+        followup_move_pct=1.5,
+        repeat_guard_min_move_pct=0.4,
+        repeat_guard_min_rsi_delta=2.0,
+    )
+    first = _candidate(current_price=100.0)
+    second = _candidate(current_price=100.2)  # +0.2% and same RSI path
+
+    ok1, reject1 = await engine.accept(first, scope="chat")
+    assert ok1 is True
+    assert reject1 is None
+
+    await asyncio.sleep(1.1)
+
+    ok2, reject2 = await engine.accept(second, scope="chat")
+    assert ok2 is False
+    assert reject2 is not None
+    assert reject2.reason == "stale_repeat"

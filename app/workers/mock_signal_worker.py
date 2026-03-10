@@ -148,6 +148,16 @@ async def _list_signal_chats(client: httpx.AsyncClient) -> list[int]:
     return [int(x) for x in raw if int(x)]
 
 
+async def _prune_old_signals(client: httpx.AsyncClient) -> int:
+    r = await client.post(
+        "/maintenance/prune-signals",
+        params={"days": settings.signal_retention_days},
+    )
+    r.raise_for_status()
+    payload = r.json()
+    return int(payload.get("deleted", 0) or 0)
+
+
 async def _run_legacy_mode(
     client: httpx.AsyncClient,
     bot: Bot,
@@ -250,9 +260,9 @@ async def _run_rsi_mode(
 ) -> None:
     try:
         universe = await fetch_top_symbols_by_volume(
-            quote_asset=settings.binance_quote_asset,
+            quote_asset=settings.bingx_quote_asset,
             top_n=settings.feed_universe_size,
-            min_quote_volume_24h=settings.binance_min_quote_volume,
+            min_quote_volume_24h=settings.bingx_min_quote_volume,
         )
     except (BinanceUniverseError, Exception):
         log.exception("Failed to load universe in RSI mode")
@@ -327,6 +337,8 @@ async def _run_rsi_mode(
                         current_volume=snapshot.current_volume,
                         avg_volume_20=snapshot.avg_volume_20,
                         quote_volume_24h=snapshot.quote_volume_24h,
+                        closes=snapshot.closes,
+                        rsi_period=settings.rsi_period,
                         generated_at=snapshot.generated_at,
                     )
                     if not candidate:
@@ -370,6 +382,8 @@ async def _run_rsi_mode(
                             if (reject and reject.reason == "cooldown")
                             else "reject_duplicate"
                             if (reject and reject.reason == "duplicate")
+                            else "reject_stale_repeat"
+                            if (reject and reject.reason == "stale_repeat")
                             else "unknown"
                         ),
                         candidate.symbol,
@@ -396,6 +410,11 @@ async def _run_rsi_mode(
                     "last_price": candidate.current_price,
                     "quote_volume": snapshot.quote_volume_24h,
                 }
+                if candidate.rsi_divergence_type and candidate.rsi_divergence_pct is not None:
+                    payload["reason"] = (
+                        f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe}) | "
+                        f"div={candidate.rsi_divergence_type} {candidate.rsi_divergence_pct:.2f}%"
+                    )
                 try:
                     await _save_feed_signal(client, payload)
                 except Exception:
@@ -426,12 +445,15 @@ async def main() -> None:
         cooldown_seconds=settings.worker_feed_cooldown_seconds,
         dedup_window_seconds=settings.signal_dedup_window_seconds,
         followup_move_pct=settings.signal_followup_move_pct,
+        repeat_guard_min_move_pct=settings.signal_repeat_guard_min_move_pct,
+        repeat_guard_min_rsi_delta=settings.signal_repeat_guard_min_rsi_delta,
         redis_url=settings.redis_url,
         redis_prefix=settings.signal_filter_redis_prefix,
     )
     shard_count = max(1, settings.worker_shard_count)
     shard_index = settings.worker_shard_index % shard_count
     log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
+    last_prune_ts = 0.0
 
     try:
         while True:
@@ -441,6 +463,21 @@ async def main() -> None:
                 await _run_legacy_mode(client, bot)
 
             await _tune_ai(client)
+            loop_time = asyncio.get_running_loop().time()
+            if (
+                settings.signal_retention_prune_interval_seconds > 0
+                and (loop_time - last_prune_ts) >= settings.signal_retention_prune_interval_seconds
+            ):
+                try:
+                    deleted = await _prune_old_signals(client)
+                    log.info(
+                        "Signal retention prune done: days=%s deleted=%s",
+                        settings.signal_retention_days,
+                        deleted,
+                    )
+                    last_prune_ts = loop_time
+                except Exception:
+                    log.exception("Signal retention prune failed")
 
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:

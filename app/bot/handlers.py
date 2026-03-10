@@ -36,7 +36,7 @@ def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> st
 def _home_text(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     return (
         "Сигнальный бот\n\n"
-        "Сканируем Binance и отправляем Pump/Dump сигналы.\n\n"
+        "Сканируем BingX и отправляем Pump/Dump сигналы.\n\n"
         f"{_status_line(cfg, universe=universe, min_vol=min_vol)}"
     )
 
@@ -45,7 +45,7 @@ def _settings_text(cfg: dict[str, object]) -> str:
     active = " ".join(cfg.get("active_timeframes", [])) or "15m"
     lower_rsi = float(cfg.get("lower_rsi", 40))
     upper_rsi = float(cfg.get("upper_rsi", 60))
-    min_vol = float(cfg.get("min_quote_volume", settings.binance_min_quote_volume))
+    min_vol = float(cfg.get("min_quote_volume", settings.bingx_min_quote_volume))
     trigger_5m = float(cfg.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct))
     trigger_15m = settings.signal_price_change_15m_trigger_pct
     return (
@@ -62,7 +62,11 @@ def _settings_text(cfg: dict[str, object]) -> str:
 async def _render_home(target: Message | CallbackQuery, api: ApiClient) -> None:
     chat_id = target.chat.id if isinstance(target, Message) else target.message.chat.id
     cfg = await api.get_user_settings(chat_id=chat_id)
-    text = _home_text(cfg, universe=settings.feed_universe_size, min_vol=float(cfg.get("min_quote_volume", settings.binance_min_quote_volume)))
+    text = _home_text(
+        cfg,
+        universe=settings.feed_universe_size,
+        min_vol=float(cfg.get("min_quote_volume", settings.bingx_min_quote_volume)),
+    )
     if isinstance(target, Message):
         await target.answer(text, reply_markup=main_menu_kb())
     else:
@@ -175,7 +179,8 @@ async def handle_price_triggers(m: Message, state: FSMContext, api: ApiClient) -
         await m.answer("Нужно два числа через пробел. Пример: 2.5 4.5")
         return
     try:
-        pct_5m, pct_15m = float(parts[0]), float(parts[1])
+        pct_5m = float(parts[0])
+        _pct_15m = float(parts[1])
     except ValueError:
         await m.answer("Не смог прочитать числа. Пример: 2.5 4.5")
         return
@@ -298,21 +303,12 @@ async def reset_no(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
     await c.answer("Отменено")
 
 
-@router.callback_query(F.data == "menu:info")
-async def menu_info(c: CallbackQuery) -> None:
-    text = (
-        "Информация\n\n"
-        "Бот отслеживает рынок Binance и отправляет поток Pump/Dump сигналов.\n"
-        "Чтобы получать сигналы чаще, включите больше таймфреймов в настройках."
-    )
-    await c.message.edit_text(text, reply_markup=panel_actions_kb())
-    await c.answer()
 
 @router.callback_query(F.data == "menu:info")
 async def menu_info(c: CallbackQuery) -> None:
     text = (
         "Информация\n\n"
-        "Бот отслеживает рынок Binance и отправляет поток Pump/Dump сигналов.\n"
+        "Бот отслеживает рынок BingX и отправляет поток Pump/Dump сигналов.\n"
         "Чтобы получать сигналы чаще, включите больше таймфреймов в настройках."
     )
     await c.message.edit_text(text, reply_markup=panel_actions_kb())

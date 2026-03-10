@@ -29,6 +29,12 @@ class DeployConfig:
     feed_movers_limit: int
     feed_min_change_pct: float
     worker_feed_cooldown_seconds: int
+    signal_price_change_5m_trigger_pct: float
+    signal_price_change_15m_trigger_pct: float
+    signal_repeat_guard_min_move_pct: float
+    signal_repeat_guard_min_rsi_delta: float
+    signal_retention_days: int
+    signal_retention_prune_interval_seconds: int
 
 
 class Deployer:
@@ -95,12 +101,16 @@ class Deployer:
             f"FEED_MOVERS_LIMIT={self.cfg.feed_movers_limit}\n"
             f"FEED_MIN_CHANGE_PCT={self.cfg.feed_min_change_pct}\n"
             f"WORKER_FEED_COOLDOWN_SECONDS={self.cfg.worker_feed_cooldown_seconds}\n"
-            "SIGNAL_PRICE_CHANGE_5M_TRIGGER_PCT=2.5\n"
-            "SIGNAL_PRICE_CHANGE_15M_TRIGGER_PCT=4.5\n"
+            f"SIGNAL_PRICE_CHANGE_5M_TRIGGER_PCT={self.cfg.signal_price_change_5m_trigger_pct}\n"
+            f"SIGNAL_PRICE_CHANGE_15M_TRIGGER_PCT={self.cfg.signal_price_change_15m_trigger_pct}\n"
             "SIGNAL_VOLUME_MULTIPLIER_BASE=1.35\n"
             "SIGNAL_VOLUME_MULTIPLIER_STRONG=1.2\n"
             "SIGNAL_STRONG_MOVE_PCT=5.0\n"
             "SIGNAL_VOLUME_AVG_WINDOW=20\n"
+            f"SIGNAL_REPEAT_GUARD_MIN_MOVE_PCT={self.cfg.signal_repeat_guard_min_move_pct}\n"
+            f"SIGNAL_REPEAT_GUARD_MIN_RSI_DELTA={self.cfg.signal_repeat_guard_min_rsi_delta}\n"
+            f"SIGNAL_RETENTION_DAYS={self.cfg.signal_retention_days}\n"
+            f"SIGNAL_RETENTION_PRUNE_INTERVAL_SECONDS={self.cfg.signal_retention_prune_interval_seconds}\n"
             "WORKER_SHARD_INDEX=0\n"
             "WORKER_SHARD_COUNT=3\n"
             "SIGNAL_FILTER_REDIS_PREFIX=signal_filter\n"
@@ -142,7 +152,13 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--feed-universe-size", default=300, type=int, help="Universe size for movers feed")
     parser.add_argument("--feed-movers-limit", default=20, type=int, help="Maximum movers in feed")
     parser.add_argument("--feed-min-change-pct", default=2.5, type=float, help="Min 24h change for movers")
-    parser.add_argument("--worker-feed-cooldown-seconds", default=1800, type=int, help="Cooldown per coin for feed alerts")
+    parser.add_argument("--worker-feed-cooldown-seconds", default=900, type=int, help="Cooldown per coin for feed alerts")
+    parser.add_argument("--signal-price-change-5m-trigger-pct", default=2.0, type=float, help="Min 5m price change trigger pct")
+    parser.add_argument("--signal-price-change-15m-trigger-pct", default=3.5, type=float, help="Min 15m price change trigger pct")
+    parser.add_argument("--signal-repeat-guard-min-move-pct", default=0.4, type=float, help="Block stale repeats if price move is below this pct")
+    parser.add_argument("--signal-repeat-guard-min-rsi-delta", default=2.0, type=float, help="Block stale repeats if RSI delta is below this value")
+    parser.add_argument("--signal-retention-days", default=14, type=int, help="How many days of signals to keep")
+    parser.add_argument("--signal-retention-prune-interval-seconds", default=3600, type=int, help="How often worker prunes old signals")
     args = parser.parse_args()
 
     return DeployConfig(
@@ -161,6 +177,12 @@ def parse_args() -> DeployConfig:
         feed_movers_limit=args.feed_movers_limit,
         feed_min_change_pct=args.feed_min_change_pct,
         worker_feed_cooldown_seconds=args.worker_feed_cooldown_seconds,
+        signal_price_change_5m_trigger_pct=args.signal_price_change_5m_trigger_pct,
+        signal_price_change_15m_trigger_pct=args.signal_price_change_15m_trigger_pct,
+        signal_repeat_guard_min_move_pct=args.signal_repeat_guard_min_move_pct,
+        signal_repeat_guard_min_rsi_delta=args.signal_repeat_guard_min_rsi_delta,
+        signal_retention_days=args.signal_retention_days,
+        signal_retention_prune_interval_seconds=args.signal_retention_prune_interval_seconds,
     )
 
 

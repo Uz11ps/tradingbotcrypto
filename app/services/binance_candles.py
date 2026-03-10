@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
-BINANCE_TICKER_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
+BINGX_KLINES_URL = "https://open-api.bingx.com/openApi/spot/v1/market/kline"
+BINGX_TICKER_24H_URL = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
 TIMEFRAME_MAP: dict[str, str] = {
     "5m": "5m",
     "15m": "15m",
@@ -27,8 +27,8 @@ class BinanceCandlesError(RuntimeError):
     pass
 
 
-def _to_binance_symbol(symbol: str) -> str:
-    return symbol.replace("/", "").replace("-", "").upper()
+def _to_bingx_symbol(symbol: str) -> str:
+    return symbol.replace("/", "-").replace("_", "-").upper()
 
 
 @dataclass(slots=True)
@@ -95,14 +95,17 @@ async def fetch_closes_and_volumes(
     if not interval:
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
 
-    pair = _to_binance_symbol(symbol)
+    pair = _to_bingx_symbol(symbol)
     response = await _request_with_retry(
-        BINANCE_KLINES_URL,
+        BINGX_KLINES_URL,
         {"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
-        label=f"klines {symbol} {timeframe}",
+        label=f"bingx klines {symbol} {timeframe}",
     )
 
-    payload: list[list[Any]] = response.json()
+    raw_payload: dict[str, Any] = response.json()
+    if int(raw_payload.get("code", -1)) != 0:
+        raise BinanceCandlesError(f"bingx klines error: {raw_payload}")
+    payload: list[list[Any]] = raw_payload.get("data") or []
     closes = [float(row[4]) for row in payload if len(row) > 5]
     volumes = [float(row[5]) for row in payload if len(row) > 5]
     if len(closes) < 30 or len(volumes) < 30:
@@ -116,27 +119,35 @@ async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list
 
 
 async def fetch_quote_volume_24h(*, symbol: str) -> float:
-    pair = _to_binance_symbol(symbol)
+    pair = _to_bingx_symbol(symbol)
     response = await _request_with_retry(
-        BINANCE_TICKER_24H_URL,
-        {"symbol": pair},
-        label=f"24h ticker {symbol}",
+        BINGX_TICKER_24H_URL,
+        {"symbol": pair, "timestamp": int(datetime.now(tz=UTC).timestamp() * 1000)},
+        label=f"bingx 24h ticker {symbol}",
     )
     payload: dict[str, Any] = response.json()
-    return float(payload.get("quoteVolume", 0.0) or 0.0)
+    if int(payload.get("code", -1)) != 0:
+        raise BinanceCandlesError(f"bingx 24h ticker error: {payload}")
+    rows: list[dict[str, Any]] = payload.get("data") or []
+    if not rows:
+        return 0.0
+    return float(rows[0].get("quoteVolume", 0.0) or 0.0)
 
 
 async def fetch_quote_volume_24h_map(*, symbols: list[str]) -> dict[str, float]:
     if not symbols:
         return {}
-    normalized = {_to_binance_symbol(symbol): symbol for symbol in symbols}
+    normalized = {_to_bingx_symbol(symbol): symbol for symbol in symbols}
     response = await _request_with_retry(
-        BINANCE_TICKER_24H_URL,
-        {},
+        BINGX_TICKER_24H_URL,
+        {"timestamp": int(datetime.now(tz=UTC).timestamp() * 1000)},
         timeout=15.0,
-        label="24h ticker map",
+        label="bingx 24h ticker map",
     )
-    payload: list[dict[str, Any]] = response.json()
+    raw_payload: dict[str, Any] = response.json()
+    if int(raw_payload.get("code", -1)) != 0:
+        raise BinanceCandlesError(f"bingx 24h ticker map error: {raw_payload}")
+    payload: list[dict[str, Any]] = raw_payload.get("data") or []
     out: dict[str, float] = {}
     for row in payload:
         pair = str(row.get("symbol", ""))

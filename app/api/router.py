@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -76,7 +76,7 @@ async def feed_movers(
     if settings.signal_engine_mode == "rsi":
         try:
             effective = await get_effective_settings(session, chat_id=chat_id)
-            symbols = await fetch_spot_symbols(quote_asset=settings.binance_quote_asset)
+            symbols = await fetch_spot_symbols(quote_asset=settings.bingx_quote_asset)
         except BinanceUniverseError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
 
@@ -636,4 +636,17 @@ async def list_user_settings_chats(session: AsyncSession = Depends(get_session))
 async def ai_tune(session: AsyncSession = Depends(get_session)) -> dict[str, float]:
     settings = await tune_strategy_from_history(session, last_n=200)
     return settings
+
+
+@router.post("/maintenance/prune-signals")
+async def prune_signals(
+    days: int = 14,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int]:
+    keep_days = max(1, min(days, 365))
+    cutoff = datetime.now(tz=UTC) - timedelta(days=keep_days)
+    result = await session.execute(delete(Signal).where(Signal.created_at < cutoff))
+    await session.commit()
+    deleted = int(result.rowcount or 0) if result.rowcount and result.rowcount > 0 else 0
+    return {"deleted": deleted, "keep_days": keep_days}
 

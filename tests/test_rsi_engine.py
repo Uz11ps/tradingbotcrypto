@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
+from app.services.rsi_engine import (
+    compute_rsi,
+    detect_rsi_divergence,
+    evaluate_rsi_signal,
+    validate_candidate_filters,
+)
 
 
 def test_compute_rsi_in_extreme_uptrend() -> None:
@@ -99,4 +104,17 @@ def test_reject_by_price_trigger() -> None:
         generated_at=ts,
     )
     assert candidate is None
+
+
+def test_detect_bearish_divergence() -> None:
+    closes = [
+        100.0, 101.0, 100.3, 102.5, 101.1, 103.0, 102.2, 103.8, 102.9, 104.2,
+        103.1, 104.6, 103.4, 104.9, 103.5, 105.2, 103.8, 105.4, 103.7, 105.6,
+        103.6, 105.8, 103.7, 106.0, 103.8, 106.1, 103.9, 106.2, 104.0, 106.3,
+    ]
+    div_type, div_pct, _ = detect_rsi_divergence(closes=closes, period=14, signal_type="dump")
+    assert div_type in {"bearish", "hidden_bearish", None}
+    if div_type is not None:
+        assert div_pct is not None
+        assert div_pct >= 0.0
 
