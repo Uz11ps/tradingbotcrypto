@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://127.0.0.1:6379/0"
     worker_interval_seconds: int = 20
-    signal_worker_replicas: int = 4
+    signal_worker_replicas: int = 5
     worker_shard_index: int = 0
     worker_shard_count: int = 1
     feed_universe_size: int = 300

@@ -5,22 +5,25 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 DEFAULT_TIMEFRAMES: list[str] = ["5m", "15m", "1h", "4h"]
 
 
-def _menu_back_row() -> list[InlineKeyboardButton]:
-    return [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:home")]
+def _persistent_bottom_rows() -> list[list[InlineKeyboardButton]]:
+    return [
+        [InlineKeyboardButton(text="ℹ️ Текущие настройки", callback_data="menu:status")],
+        [
+            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
+            InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:home"),
+        ],
+    ]
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
-                InlineKeyboardButton(text="⏱ ТФ", callback_data="menu:settings"),  # alias to settings
-            ],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings")],
             [
                 InlineKeyboardButton(text="📡 Лента", callback_data="menu:feed"),
                 InlineKeyboardButton(text="ℹ️ Инфо", callback_data="menu:info"),
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -28,17 +31,15 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 def settings_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Триггер цены, %", callback_data="settings:trigger")],
             [InlineKeyboardButton(text="Таймфреймы", callback_data="settings:tfs")],
-            [InlineKeyboardButton(text="Минимальное движение, %", callback_data="settings:trigger")],
-            [InlineKeyboardButton(text="Направление", callback_data="settings:side")],
+            [InlineKeyboardButton(text="Направление ленты", callback_data="settings:side")],
             [InlineKeyboardButton(text="Тип рынка", callback_data="settings:market")],
             [InlineKeyboardButton(text="Режимы сигналов", callback_data="settings:modes")],
-            [
-                InlineKeyboardButton(text="RSI", callback_data="settings:rsi"),
-            ],
+            [InlineKeyboardButton(text="RSI", callback_data="settings:rsi")],
             [InlineKeyboardButton(text="Мин. объём", callback_data="settings:volume")],
             [InlineKeyboardButton(text="Сброс", callback_data="settings:reset")],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -61,7 +62,7 @@ def timeframes_kb(active: list[str]) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Готово", callback_data="tfs:done"),
                 InlineKeyboardButton(text="Отмена", callback_data="menu:settings"),
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -76,13 +77,13 @@ def feed_kb(mode: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=pump_text, callback_data="feed:toggle:pump"),
                 InlineKeyboardButton(text=dump_text, callback_data="feed:toggle:dump"),
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
 
 def panel_actions_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[_menu_back_row()])
+    return InlineKeyboardMarkup(inline_keyboard=_persistent_bottom_rows())
 
 
 def signal_side_kb(current_mode: str) -> InlineKeyboardMarkup:
@@ -92,7 +93,7 @@ def signal_side_kb(current_mode: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Все" if mode == "all" else "Все", callback_data="side:set:all")],
             [InlineKeyboardButton(text="✅ Только pump" if mode == "pump" else "Только pump", callback_data="side:set:pump")],
             [InlineKeyboardButton(text="✅ Только dump" if mode == "dump" else "Только dump", callback_data="side:set:dump")],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -114,7 +115,7 @@ def market_type_kb(current_market_type: str) -> InlineKeyboardMarkup:
                     callback_data="market:set:both",
                 )
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -134,7 +135,7 @@ def signal_modes_kb(feed_mode_enabled: bool, strategy_mode_enabled: bool) -> Inl
                     callback_data="modes:toggle:strategy",
                 )
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )
 
@@ -146,6 +147,6 @@ def reset_confirm_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Да", callback_data="reset:yes"),
                 InlineKeyboardButton(text="Нет", callback_data="reset:no"),
             ],
-            _menu_back_row(),
+            *_persistent_bottom_rows(),
         ]
     )

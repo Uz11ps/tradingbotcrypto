@@ -43,7 +43,7 @@ def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> st
 def _home_text(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     return (
         "Сигнальный бот\n\n"
-        "Сканируем BingX и отправляем Pump/Dump сигналы.\n\n"
+        "Сканируем BingX и отправляем сигналы.\n\n"
         f"{_status_line(cfg, universe=universe, min_vol=min_vol)}"
     )
 
@@ -93,6 +93,11 @@ async def _render_settings(c: CallbackQuery, api: ApiClient) -> None:
     await c.message.edit_text(text, reply_markup=settings_main_kb())
 
 
+def _status_popup(cfg: dict[str, object]) -> str:
+    min_vol = float(cfg.get("min_quote_volume", settings.bingx_min_quote_volume))
+    return _status_line(cfg, universe=settings.feed_universe_size, min_vol=min_vol)
+
+
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
@@ -113,6 +118,12 @@ async def menu_settings(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
     await c.answer()
+
+
+@router.callback_query(F.data == "menu:status")
+async def menu_status(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    await c.answer(_status_popup(cfg), show_alert=True)
 
 
 @router.callback_query(F.data == "menu:feed")
@@ -150,7 +161,7 @@ async def feed_toggle(c: CallbackQuery, api: ApiClient) -> None:
         f"Текущий режим: {label}"
     )
     await c.message.edit_text(text, reply_markup=feed_kb(mode=next_mode))
-    await c.answer("Режим обновлён")
+    await c.answer(f"Режим ленты обновлён: {label}", show_alert=True)
 
 
 @router.callback_query(F.data == "settings:tfs")
@@ -185,7 +196,7 @@ async def toggle_tfs(c: CallbackQuery, state: FSMContext, api: ApiClient) -> Non
 async def tfs_done(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("Таймфреймы обновлены")
+    await c.answer("Таймфреймы обновлены", show_alert=True)
 
 
 @router.callback_query(F.data == "settings:trigger")
@@ -211,7 +222,7 @@ async def handle_min_price_move(m: Message, state: FSMContext, api: ApiClient) -
     await state.set_state(UserFlow.main)
     await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=min_move)
     await m.answer(
-        f"Сохранено: минимальное движение ≥ {min_move:.1f}%",
+        f"Триггер цены обновлён: {min_move:.1f}%",
         reply_markup=main_menu_kb(),
     )
 
@@ -310,14 +321,14 @@ async def reset_yes(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None
     )
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("Сброшено")
+    await c.answer("Настройки сброшены", show_alert=True)
 
 
 @router.callback_query(F.data == "reset:no", UserFlow.confirming_reset)
 async def reset_no(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("Отменено")
+    await c.answer("Сброс отменён", show_alert=True)
 
 
 
@@ -355,7 +366,8 @@ async def set_side_mode(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
     await api.update_user_settings(chat_id=c.message.chat.id, signal_side_mode=mode)
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("Режим направления обновлён")
+    labels = {"all": "Все", "pump": "Только pump", "dump": "Только dump"}
+    await c.answer(f"Направление ленты: {labels[mode]}", show_alert=True)
 
 
 @router.callback_query(F.data == "settings:market")
@@ -379,7 +391,8 @@ async def set_market_mode(c: CallbackQuery, state: FSMContext, api: ApiClient) -
     await api.update_user_settings(chat_id=c.message.chat.id, market_type=mode)
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
-    await c.answer("Тип рынка обновлён")
+    labels = {"spot": "Spot", "futures": "Futures", "both": "Spot + Futures"}
+    await c.answer(f"Тип рынка обновлён: {labels[mode]}", show_alert=True)
 
 
 @router.callback_query(F.data == "settings:modes")
@@ -421,5 +434,11 @@ async def modes_toggle(c: CallbackQuery, api: ApiClient) -> None:
             strategy_mode_enabled=strategy_mode_enabled,
         ),
     )
-    await c.answer("Режимы обновлены")
+    await c.answer(
+        (
+            f"Лента: {'Вкл' if feed_mode_enabled else 'Выкл'}\n"
+            f"Стратегия: {'Вкл' if strategy_mode_enabled else 'Выкл'}"
+        ),
+        show_alert=True,
+    )
 

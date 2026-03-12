@@ -28,10 +28,10 @@ docker compose up -d --build
 docker compose --profile worker up -d signal_worker
 ```
 
-Масштабирование воркеров (пример на 4 реплики):
+Масштабирование воркеров (пример на 5 реплик):
 
 ```bash
-docker compose --profile worker up -d --scale signal_worker=4
+docker compose --profile worker up -d --scale signal_worker=5
 ```
 
 ### Полный стек с воркером сразу

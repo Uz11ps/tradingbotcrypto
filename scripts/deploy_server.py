@@ -162,7 +162,7 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--signal-repeat-guard-min-rsi-delta", default=2.0, type=float, help="Block stale repeats if RSI delta is below this value")
     parser.add_argument("--signal-retention-days", default=14, type=int, help="How many days of signals to keep")
     parser.add_argument("--signal-retention-prune-interval-seconds", default=3600, type=int, help="How often worker prunes old signals")
-    parser.add_argument("--signal-worker-replicas", default=4, type=int, help="Number of worker replicas")
+    parser.add_argument("--signal-worker-replicas", default=5, type=int, help="Number of worker replicas")
     args = parser.parse_args()
 
     return DeployConfig(

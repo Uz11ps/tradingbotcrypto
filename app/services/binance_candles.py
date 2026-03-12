@@ -16,6 +16,12 @@ TIMEFRAME_MAP: dict[str, str] = {
     "1h": "1h",
     "4h": "4h",
 }
+TIMEFRAME_TO_MS: dict[str, int] = {
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+}
 
 MAX_RETRIES = 2
 RETRY_BACKOFF = 1.5
@@ -45,6 +51,8 @@ class CandleSnapshot:
     quote_volume_24h: float
     window_open_price: float
     closes: list[float]
+    signal_candle_open_time_ms: int
+    signal_candle_close_time_ms: int
     generated_at: datetime
 
 
@@ -212,7 +220,14 @@ async def build_snapshot(
     volume_avg_window: int = 20,
     quote_volume_24h: float | None = None,
 ) -> CandleSnapshot:
-    closes, volumes = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=100)
+    bars = await fetch_recent_bars(symbol=symbol, timeframe=timeframe, limit=100)
+    # Most exchanges return the current forming bar as the last kline entry.
+    # To avoid "future-looking" signal prices, we lock snapshots to the last closed candle.
+    closed_bars = bars[:-1] if len(bars) >= 31 else bars
+    closes = [bar.close for bar in closed_bars]
+    volumes = [bar.volume for bar in closed_bars]
+    if len(closes) < 30 or len(volumes) < 30:
+        raise BinanceCandlesError(f"Not enough closed bars for {symbol} {timeframe}")
     if quote_volume_24h is None:
         quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
     prev_close = closes[-2]
@@ -232,6 +247,8 @@ async def build_snapshot(
         price_change_5m = 0.0
         price_change_15m = _window_change(closes, 1)
         window_open_price = closes[-2]
+    current_bar = closed_bars[-1]
+    interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
     return CandleSnapshot(
         symbol=symbol,
         timeframe=timeframe,
@@ -245,6 +262,8 @@ async def build_snapshot(
         quote_volume_24h=quote_volume_24h,
         window_open_price=window_open_price,
         closes=closes,
+        signal_candle_open_time_ms=current_bar.open_time_ms,
+        signal_candle_close_time_ms=current_bar.open_time_ms + interval_ms,
         generated_at=datetime.now(tz=UTC),
     )
 

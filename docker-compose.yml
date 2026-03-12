@@ -68,7 +68,7 @@ services:
     environment:
       API_PUBLIC_BASE_URL: http://api:8000
       WORKER_SHARD_INDEX: ${WORKER_SHARD_INDEX:--1}
-      WORKER_SHARD_COUNT: ${WORKER_SHARD_COUNT:-4}
+      WORKER_SHARD_COUNT: ${WORKER_SHARD_COUNT:-5}
       SIGNAL_DEBUG_FULL_ENABLED: ${SIGNAL_DEBUG_FULL_ENABLED:-false}
     command: python -m app.workers.mock_signal_worker
     depends_on:
