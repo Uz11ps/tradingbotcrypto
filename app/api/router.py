@@ -16,6 +16,8 @@ from app.api.schemas import (
     MarketOverviewOut,
     NewsSentimentOut,
     PerformanceStatsOut,
+    RawCandidateIn,
+    ScanLogIn,
     SignalCreate,
     SignalOut,
     StatsOverviewOut,
@@ -29,6 +31,8 @@ from app.core.config import settings
 from app.db.models import (
     AnalyticsLog,
     NewsAndSentiment,
+    RawCandidate,
+    ScanLog,
     Signal,
     SignalDirection,
     SignalType,
@@ -54,6 +58,7 @@ from app.services.market_feed import MarketFeedError, fetch_top_movers
 from app.services.news_sentiment import NewsSentimentError, fetch_news_and_sentiment
 from app.services.performance import build_performance_stats
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
+from app.services.signal_presentation import build_recommendation, matches_signal_side_mode
 from app.services.user_settings import get_effective_settings, upsert_user_settings
 
 router = APIRouter()
@@ -73,9 +78,11 @@ async def feed_movers(
     chat_id: int | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> FeedOut:
+    effective = await get_effective_settings(session, chat_id=chat_id) if chat_id else None
+
     if settings.signal_engine_mode == "rsi":
         try:
-            effective = await get_effective_settings(session, chat_id=chat_id)
+            effective_rsi = effective or await get_effective_settings(session, chat_id=chat_id)
             symbols = await fetch_spot_symbols(quote_asset=settings.bingx_quote_asset)
         except BinanceUniverseError as e:
             raise HTTPException(status_code=502, detail=str(e)) from e
@@ -85,7 +92,7 @@ async def feed_movers(
         for symbol in selected:
             if len(rows) >= max(1, min(limit, 50)):
                 break
-            for timeframe in effective.active_timeframes:
+            for timeframe in effective_rsi.active_timeframes:
                 if timeframe not in TIMEFRAME_MAP:
                     continue
                 try:
@@ -102,8 +109,8 @@ async def feed_movers(
                         rsi_value=rsi,
                         price_change_5m=snapshot.price_change_5m,
                         price_change_15m=snapshot.price_change_15m,
-                        price_change_5m_trigger_pct=effective.min_price_move_pct,
-                        price_change_15m_trigger_pct=effective.price_change_15m_trigger_pct,
+                        price_change_5m_trigger_pct=effective_rsi.min_price_move_pct,
+                        price_change_15m_trigger_pct=effective_rsi.price_change_15m_trigger_pct,
                         window_open_price=snapshot.window_open_price,
                         current_price=snapshot.current_close,
                         pct_change=snapshot.pct_change,
@@ -116,10 +123,17 @@ async def feed_movers(
                         continue
                     is_valid, _ = validate_candidate_filters(
                         candidate,
-                        lower_rsi=max(effective.lower_rsi, 40.0),
-                        upper_rsi=min(effective.upper_rsi, 60.0),
+                        lower_rsi=max(effective_rsi.lower_rsi, 40.0),
+                        upper_rsi=min(effective_rsi.upper_rsi, 60.0),
                     )
                     if not is_valid:
+                        continue
+                    if abs(candidate.pct_change) < effective_rsi.min_price_move_pct:
+                        continue
+                    if not matches_signal_side_mode(
+                        effective_rsi.signal_side_mode,
+                        signal_type=candidate.signal_type,
+                    ):
                         continue
                     rows.append(
                         FeedMoverOut(
@@ -130,6 +144,11 @@ async def feed_movers(
                             prev_price=candidate.prev_price,
                             current_price=candidate.current_price,
                             generated_at=candidate.generated_at,
+                            recommendation=build_recommendation(
+                                direction="up" if candidate.signal_type == "pump" else "down",
+                                signal_type=candidate.signal_type,
+                                action="entry",
+                            ),
                         )
                     )
                 except (BinanceCandlesError, ValueError):
@@ -155,8 +174,24 @@ async def feed_movers(
             prev_price=float(m["last_price"]),
             current_price=float(m["last_price"]),
             generated_at=payload["generated_at"],
+            recommendation=build_recommendation(
+                direction=m["direction"],
+                signal_type="pump" if m["direction"] == "up" else "dump",
+                action="watch",
+            ),
         )
         for m in payload.get("movers", [])
+        if (
+            effective is None
+            or (
+                abs(float(m["change_24h_pct"])) >= effective.min_price_move_pct
+                and matches_signal_side_mode(
+                    effective.signal_side_mode,
+                    direction=m["direction"],
+                    signal_type="pump" if m["direction"] == "up" else "dump",
+                )
+            )
+        )
     ]
     return FeedOut(generated_at=payload["generated_at"], universe_size=payload["universe_size"], movers=movers)
 
@@ -189,6 +224,7 @@ async def list_signals(
             action=s.action,
             source="hybrid",
             signal_type=s.signal_type,
+            market_type=s.market_type,
             trigger_source=s.trigger_source,
             rsi_value=s.rsi_value,
             prev_price=s.prev_price,
@@ -196,6 +232,11 @@ async def list_signals(
             volume=s.volume,
             liquidity=None,
             reason=s.reason,
+            recommendation=build_recommendation(
+                direction=s.direction.value,
+                signal_type=s.signal_type,
+                action=s.action,
+            ),
         )
         for s in rows
     ]
@@ -217,7 +258,13 @@ async def create_signal(
         try:
             signal_type = SignalType(payload.signal_type).value
         except ValueError as e:
-            raise HTTPException(status_code=400, detail="signal_type must be 'pump' or 'dump'") from e
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "signal_type must be one of: "
+                    "'pump', 'dump', 'post_dump_bounce_long', 'post_pump_pullback_short'"
+                ),
+            ) from e
 
     s = Signal(
         symbol=payload.symbol,
@@ -226,6 +273,7 @@ async def create_signal(
         strength=payload.strength,
         action=payload.action,
         signal_type=signal_type,
+        market_type=payload.market_type,
         trigger_source=payload.trigger_source,
         rsi_value=payload.rsi_value,
         prev_price=payload.prev_price,
@@ -247,6 +295,7 @@ async def create_signal(
         action=s.action,
         source=payload.source,
         signal_type=s.signal_type,
+        market_type=s.market_type,
         trigger_source=s.trigger_source,
         rsi_value=s.rsi_value,
         prev_price=s.prev_price,
@@ -254,6 +303,11 @@ async def create_signal(
         volume=s.volume,
         liquidity=payload.liquidity,
         reason=s.reason,
+        recommendation=build_recommendation(
+            direction=s.direction.value,
+            signal_type=s.signal_type,
+            action=s.action,
+        ),
     )
 
 
@@ -340,6 +394,7 @@ async def live_signal(
         summary=summary,
         ai_score=float(ai["score"]),
         ai_explanation=str(ai["explanation"]),
+        recommendation=build_recommendation(direction=direction, action=action),
     )
 
 
@@ -598,6 +653,10 @@ async def get_user_settings(
         active_timeframes=effective.active_timeframes,
         min_price_move_pct=effective.min_price_move_pct,
         min_quote_volume=effective.min_quote_volume,
+        signal_side_mode=effective.signal_side_mode,
+        market_type=effective.market_type,
+        feed_mode_enabled=effective.feed_mode_enabled,
+        strategy_mode_enabled=effective.strategy_mode_enabled,
     )
 
 
@@ -615,6 +674,10 @@ async def update_user_settings(
         active_timeframes=payload.active_timeframes,
         min_price_move_pct=payload.min_price_move_pct,
         min_quote_volume=payload.min_quote_volume,
+        signal_side_mode=payload.signal_side_mode,
+        market_type=payload.market_type,
+        feed_mode_enabled=payload.feed_mode_enabled,
+        strategy_mode_enabled=payload.strategy_mode_enabled,
     )
     return UserSignalSettingsOut(
         chat_id=chat_id,
@@ -623,6 +686,10 @@ async def update_user_settings(
         active_timeframes=effective.active_timeframes,
         min_price_move_pct=effective.min_price_move_pct,
         min_quote_volume=effective.min_quote_volume,
+        signal_side_mode=effective.signal_side_mode,
+        market_type=effective.market_type,
+        feed_mode_enabled=effective.feed_mode_enabled,
+        strategy_mode_enabled=effective.strategy_mode_enabled,
     )
 
 
@@ -645,8 +712,87 @@ async def prune_signals(
 ) -> dict[str, int]:
     keep_days = max(1, min(days, 365))
     cutoff = datetime.now(tz=UTC) - timedelta(days=keep_days)
-    result = await session.execute(delete(Signal).where(Signal.created_at < cutoff))
+    result_signals = await session.execute(delete(Signal).where(Signal.created_at < cutoff))
+    result_analytics = await session.execute(delete(AnalyticsLog).where(AnalyticsLog.created_at < cutoff))
+    result_news = await session.execute(delete(NewsAndSentiment).where(NewsAndSentiment.created_at < cutoff))
+    result_raw_candidates = await session.execute(
+        delete(RawCandidate).where(RawCandidate.created_at < cutoff)
+    )
+    result_scan_logs = await session.execute(delete(ScanLog).where(ScanLog.created_at < cutoff))
     await session.commit()
-    deleted = int(result.rowcount or 0) if result.rowcount and result.rowcount > 0 else 0
-    return {"deleted": deleted, "keep_days": keep_days}
+    deleted_signals = (
+        int(result_signals.rowcount or 0)
+        if result_signals.rowcount and result_signals.rowcount > 0
+        else 0
+    )
+    deleted_analytics = (
+        int(result_analytics.rowcount or 0)
+        if result_analytics.rowcount and result_analytics.rowcount > 0
+        else 0
+    )
+    deleted_news = int(result_news.rowcount or 0) if result_news.rowcount and result_news.rowcount > 0 else 0
+    deleted_raw_candidates = (
+        int(result_raw_candidates.rowcount or 0)
+        if result_raw_candidates.rowcount and result_raw_candidates.rowcount > 0
+        else 0
+    )
+    deleted_scan_logs = (
+        int(result_scan_logs.rowcount or 0)
+        if result_scan_logs.rowcount and result_scan_logs.rowcount > 0
+        else 0
+    )
+    return {
+        "keep_days": keep_days,
+        "deleted_signals": deleted_signals,
+        "deleted_analytics_logs": deleted_analytics,
+        "deleted_news_and_sentiment": deleted_news,
+        "deleted_raw_candidates": deleted_raw_candidates,
+        "deleted_scan_logs": deleted_scan_logs,
+        "deleted_total": (
+            deleted_signals
+            + deleted_analytics
+            + deleted_news
+            + deleted_raw_candidates
+            + deleted_scan_logs
+        ),
+    }
+
+
+@router.post("/telemetry/raw-candidates")
+async def create_raw_candidate(
+    payload: RawCandidateIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    row = RawCandidate(
+        chat_id=payload.chat_id,
+        symbol=payload.symbol,
+        timeframe=payload.timeframe,
+        market_type=payload.market_type,
+        mode=payload.mode,
+        decision=payload.decision,
+        reject_reason=payload.reject_reason,
+        payload=json.dumps(payload.payload) if payload.payload is not None else None,
+    )
+    session.add(row)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/telemetry/scan-logs")
+async def create_scan_log(
+    payload: ScanLogIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    row = ScanLog(
+        chat_id=payload.chat_id,
+        symbol=payload.symbol,
+        timeframe=payload.timeframe,
+        market_type=payload.market_type,
+        mode=payload.mode,
+        event=payload.event,
+        details=json.dumps(payload.details) if payload.details is not None else None,
+    )
+    session.add(row)
+    await session.commit()
+    return {"ok": True}
 

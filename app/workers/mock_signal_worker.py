@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
+import re
+from dataclasses import dataclass
 
 import httpx
 from aiogram import Bot
@@ -12,16 +15,28 @@ from app.core.logging import setup_logging
 from app.services.binance_candles import (
     BinanceCandlesError,
     build_snapshot,
+    fetch_recent_bars,
 )
 from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
-from app.services.feed_formatter import format_signal_card
+from app.services.feed_formatter import format_signal_card, format_strategy_signal_card
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.signal_filters import SignalFilterEngine
+from app.services.signal_presentation import matches_signal_side_mode
+from app.services.strategy_engine import detect_pinbar_strategy_signal
 
 log = logging.getLogger("workers.mock_signal_worker")
 
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+
+
+@dataclass(slots=True)
+class _FilterProxy:
+    symbol: str
+    timeframe: str
+    signal_type: str
+    current_price: float
+    rsi_value: float = 0.0
 
 
 def _select_shard_symbols(symbols: list[str], *, shard_index: int, shard_count: int) -> list[str]:
@@ -112,6 +127,7 @@ async def _save_feed_signal(client: httpx.AsyncClient, mover: dict[str, object])
             "action": mover.get("action", "watch"),
             "source": str(mover.get("source", "cex")),
             "signal_type": mover.get("signal_type"),
+            "market_type": mover.get("market_type", "spot"),
             "trigger_source": mover.get("trigger_source"),
             "rsi_value": mover.get("rsi_value"),
             "prev_price": mover.get("prev_price"),
@@ -155,7 +171,89 @@ async def _prune_old_signals(client: httpx.AsyncClient) -> int:
     )
     r.raise_for_status()
     payload = r.json()
-    return int(payload.get("deleted", 0) or 0)
+    return int(payload.get("deleted_total", 0) or 0)
+
+
+def _resolve_market_types(mode: str) -> list[str]:
+    normalized = (mode or "both").strip().lower()
+    if normalized == "spot":
+        return ["spot"]
+    if normalized == "futures":
+        return ["futures"]
+    return ["spot", "futures"]
+
+
+def _resolve_shard_index(shard_count: int) -> int:
+    if settings.worker_shard_index >= 0:
+        return settings.worker_shard_index % shard_count
+    hostname = os.getenv("HOSTNAME", "")
+    match = re.search(r"-(\d+)$", hostname)
+    if not match:
+        return 0
+    # Docker compose replica names end with 1..N
+    return (int(match.group(1)) - 1) % shard_count
+
+
+async def _debug_raw_candidate(
+    client: httpx.AsyncClient,
+    *,
+    chat_id: int,
+    symbol: str,
+    timeframe: str,
+    market_type: str,
+    mode: str,
+    decision: str,
+    reject_reason: str | None,
+    payload: dict[str, object],
+) -> None:
+    if not settings.signal_debug_full_enabled:
+        return
+    try:
+        await client.post(
+            "/telemetry/raw-candidates",
+            json={
+                "chat_id": chat_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "market_type": market_type,
+                "mode": mode,
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "payload": payload,
+            },
+        )
+    except Exception:
+        log.exception("Failed to write raw candidate telemetry")
+
+
+async def _debug_scan_event(
+    client: httpx.AsyncClient,
+    *,
+    chat_id: int,
+    symbol: str,
+    timeframe: str,
+    market_type: str,
+    mode: str,
+    event: str,
+    details: dict[str, object] | None = None,
+) -> None:
+    if not settings.signal_debug_full_enabled:
+        return
+    try:
+        await client.post(
+            "/telemetry/scan-logs",
+            json={
+                "chat_id": chat_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "market_type": market_type,
+                "mode": mode,
+                "event": event,
+                "details": details or {},
+            },
+        )
+    except Exception:
+        log.exception("Failed to write scan log telemetry")
 
 
 async def _run_legacy_mode(
@@ -220,6 +318,7 @@ async def _run_legacy_mode(
                     "action": "watch",
                     "source": "cex",
                     "signal_type": signal_type,
+                    "market_type": "spot",
                     "trigger_source": "legacy_feed",
                     "prev_price": prev_price,
                     "last_price": current_price,
@@ -309,124 +408,297 @@ async def _run_rsi_mode(
         trigger_15m = float(
             effective.get("price_change_15m_trigger_pct", settings.signal_price_change_15m_trigger_pct)
         )
+        side_mode = str(effective.get("signal_side_mode", "all"))
+        market_types = _resolve_market_types(str(effective.get("market_type", "both")))
+        feed_mode_enabled = bool(effective.get("feed_mode_enabled", True))
+        strategy_mode_enabled = bool(effective.get("strategy_mode_enabled", True))
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
-        for timeframe in active_timeframes:
-            for symbol in shard_symbols:
-                if sent_in_cycle >= max_signals_per_cycle:
-                    break
-                try:
-                    snapshot = await build_snapshot(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        volume_avg_window=settings.signal_volume_avg_window,
-                        quote_volume_24h=volume_map.get(symbol),
-                    )
-                    rsi_value = compute_rsi(snapshot.closes, period=settings.rsi_period)
-                    candidate = evaluate_rsi_signal(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        rsi_value=rsi_value,
-                        price_change_5m=snapshot.price_change_5m,
-                        price_change_15m=snapshot.price_change_15m,
-                        price_change_5m_trigger_pct=trigger_5m,
-                        price_change_15m_trigger_pct=trigger_15m,
-                        window_open_price=snapshot.window_open_price,
-                        current_price=snapshot.current_close,
-                        pct_change=snapshot.pct_change,
-                        current_volume=snapshot.current_volume,
-                        avg_volume_20=snapshot.avg_volume_20,
-                        quote_volume_24h=snapshot.quote_volume_24h,
-                        closes=snapshot.closes,
-                        rsi_period=settings.rsi_period,
-                        generated_at=snapshot.generated_at,
-                    )
-                    if not candidate:
-                        log.info(
-                            "RSI reject: reject_price_trigger symbol=%s tf=%s chg5m=%.4f chg15m=%.4f",
-                            symbol,
-                            timeframe,
-                            snapshot.price_change_5m,
-                            snapshot.price_change_15m,
-                        )
-                        continue
-                except (BinanceCandlesError, ValueError):
-                    log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
-                    continue
-                finally:
-                    await asyncio.sleep(0.08)
-
-                is_valid, reject_reason = validate_candidate_filters(
-                    candidate,
-                    lower_rsi=lower_rsi,
-                    upper_rsi=upper_rsi,
+        for market_type in market_types:
+            if market_type == "futures":
+                # Futures stream adapter will be introduced separately; keep mode configurable now.
+                log.info("RSI mode: futures selected but adapter not configured yet, chat_id=%s", chat_id)
+                await _debug_scan_event(
+                    client,
+                    chat_id=chat_id,
+                    symbol="-",
+                    timeframe="-",
+                    market_type=market_type,
+                    mode="system",
+                    event="futures_adapter_not_configured",
+                    details={"chat_id": chat_id},
                 )
-                if not is_valid:
-                    log.info(
-                        "RSI reject: %s symbol=%s tf=%s chg5m=%.4f chg15m=%.4f rsi=%.2f",
-                        reject_reason,
-                        candidate.symbol,
-                        candidate.timeframe,
-                        candidate.price_change_5m,
-                        candidate.price_change_15m,
-                        candidate.rsi_value,
-                    )
-                    continue
+                continue
 
-                accepted, reject = await filters.accept(candidate, scope=str(chat_id))
-                if not accepted:
-                    log.info(
-                        "RSI reject: %s symbol=%s tf=%s signal_type=%s details=%s",
-                        (
-                            "reject_cooldown"
-                            if (reject and reject.reason == "cooldown")
-                            else "reject_duplicate"
-                            if (reject and reject.reason == "duplicate")
-                            else "reject_stale_repeat"
-                            if (reject and reject.reason == "stale_repeat")
-                            else "unknown"
-                        ),
-                        candidate.symbol,
-                        candidate.timeframe,
-                        candidate.signal_type,
-                        reject.details if reject else "-",
-                    )
-                    continue
+            for timeframe in active_timeframes:
+                for symbol in shard_symbols:
+                    if sent_in_cycle >= max_signals_per_cycle:
+                        break
+                    try:
+                        snapshot = await build_snapshot(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            volume_avg_window=settings.signal_volume_avg_window,
+                            quote_volume_24h=volume_map.get(symbol),
+                        )
+                    except (BinanceCandlesError, ValueError):
+                        log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
+                        continue
+                    finally:
+                        await asyncio.sleep(0.08)
 
-                payload = {
-                    "symbol": candidate.symbol,
-                    "timeframe": candidate.timeframe,
-                    "direction": "up" if candidate.signal_type == "pump" else "down",
-                    "strength": 1.0,
-                    "action": "entry",
-                    "source": "cex",
-                    "signal_type": candidate.signal_type,
-                    "trigger_source": candidate.trigger_source,
-                    "rsi_value": candidate.rsi_value,
-                    "prev_price": candidate.prev_price,
-                    "price": candidate.current_price,
-                    "volume": snapshot.quote_volume_24h,
-                    "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
-                    "last_price": candidate.current_price,
-                    "quote_volume": snapshot.quote_volume_24h,
-                }
-                if candidate.rsi_divergence_type and candidate.rsi_divergence_pct is not None:
-                    payload["reason"] = (
-                        f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe}) | "
-                        f"div={candidate.rsi_divergence_type} {candidate.rsi_divergence_pct:.2f}%"
-                    )
-                try:
-                    await _save_feed_signal(client, payload)
-                except Exception:
-                    log.exception("Failed to save RSI signal for %s %s", candidate.symbol, candidate.timeframe)
-                    continue
+                    if feed_mode_enabled:
+                        try:
+                            rsi_value = compute_rsi(snapshot.closes, period=settings.rsi_period)
+                            candidate = evaluate_rsi_signal(
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                rsi_value=rsi_value,
+                                price_change_5m=snapshot.price_change_5m,
+                                price_change_15m=snapshot.price_change_15m,
+                                price_change_5m_trigger_pct=trigger_5m,
+                                price_change_15m_trigger_pct=trigger_15m,
+                                window_open_price=snapshot.window_open_price,
+                                current_price=snapshot.current_close,
+                                pct_change=snapshot.pct_change,
+                                current_volume=snapshot.current_volume,
+                                avg_volume_20=snapshot.avg_volume_20,
+                                quote_volume_24h=snapshot.quote_volume_24h,
+                                closes=snapshot.closes,
+                                rsi_period=settings.rsi_period,
+                                generated_at=snapshot.generated_at,
+                            )
+                        except ValueError:
+                            candidate = None
 
-                try:
-                    await bot.send_message(chat_id, format_signal_card(candidate))
-                except Exception:
-                    log.exception("Failed to send RSI feed alert for %s chat_id=%s", candidate.symbol, chat_id)
-                    continue
-                sent_in_cycle += 1
+                        if not candidate:
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                market_type=market_type,
+                                mode="feed",
+                                decision="reject",
+                                reject_reason="reject_price_trigger",
+                                payload={
+                                    "price_change_5m": snapshot.price_change_5m,
+                                    "price_change_15m": snapshot.price_change_15m,
+                                },
+                            )
+                        else:
+                            is_valid, reject_reason = validate_candidate_filters(
+                                candidate,
+                                lower_rsi=lower_rsi,
+                                upper_rsi=upper_rsi,
+                            )
+                            if (not is_valid) or abs(candidate.pct_change) < trigger_5m:
+                                await _debug_raw_candidate(
+                                    client,
+                                    chat_id=chat_id,
+                                    symbol=candidate.symbol,
+                                    timeframe=candidate.timeframe,
+                                    market_type=market_type,
+                                    mode="feed",
+                                    decision="reject",
+                                    reject_reason=reject_reason or "reject_user_min_move",
+                                    payload={
+                                        "pct_change": candidate.pct_change,
+                                        "rsi": candidate.rsi_value,
+                                    },
+                                )
+                            elif not matches_signal_side_mode(side_mode, signal_type=candidate.signal_type):
+                                await _debug_raw_candidate(
+                                    client,
+                                    chat_id=chat_id,
+                                    symbol=candidate.symbol,
+                                    timeframe=candidate.timeframe,
+                                    market_type=market_type,
+                                    mode="feed",
+                                    decision="reject",
+                                    reject_reason="reject_side_mode",
+                                    payload={"signal_type": candidate.signal_type, "mode": side_mode},
+                                )
+                            else:
+                                accepted, reject = await filters.accept(candidate, scope=str(chat_id))
+                                if not accepted:
+                                    await _debug_raw_candidate(
+                                        client,
+                                        chat_id=chat_id,
+                                        symbol=candidate.symbol,
+                                        timeframe=candidate.timeframe,
+                                        market_type=market_type,
+                                        mode="feed",
+                                        decision="reject",
+                                        reject_reason=reject.reason if reject else "reject_unknown",
+                                        payload={"details": reject.details if reject else "-"},
+                                    )
+                                else:
+                                    payload = {
+                                        "symbol": candidate.symbol,
+                                        "timeframe": candidate.timeframe,
+                                        "direction": "up" if candidate.signal_type == "pump" else "down",
+                                        "strength": 1.0,
+                                        "action": "entry",
+                                        "source": "cex",
+                                        "signal_type": candidate.signal_type,
+                                        "market_type": market_type,
+                                        "trigger_source": candidate.trigger_source,
+                                        "rsi_value": candidate.rsi_value,
+                                        "prev_price": candidate.prev_price,
+                                        "price": candidate.current_price,
+                                        "volume": snapshot.quote_volume_24h,
+                                        "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
+                                        "last_price": candidate.current_price,
+                                        "quote_volume": snapshot.quote_volume_24h,
+                                    }
+                                    if candidate.rsi_divergence_type and candidate.rsi_divergence_pct is not None:
+                                        payload["reason"] = (
+                                            f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe}) | "
+                                            f"div={candidate.rsi_divergence_type} {candidate.rsi_divergence_pct:.2f}%"
+                                        )
+                                    try:
+                                        await _save_feed_signal(client, payload)
+                                        await bot.send_message(chat_id, format_signal_card(candidate))
+                                        sent_in_cycle += 1
+                                        await _debug_scan_event(
+                                            client,
+                                            chat_id=chat_id,
+                                            symbol=candidate.symbol,
+                                            timeframe=candidate.timeframe,
+                                            market_type=market_type,
+                                            mode="feed",
+                                            event="signal_sent",
+                                            details={"signal_type": candidate.signal_type},
+                                        )
+                                        await _debug_raw_candidate(
+                                            client,
+                                            chat_id=chat_id,
+                                            symbol=candidate.symbol,
+                                            timeframe=candidate.timeframe,
+                                            market_type=market_type,
+                                            mode="feed",
+                                            decision="accept",
+                                            reject_reason=None,
+                                            payload={"pct_change": candidate.pct_change},
+                                        )
+                                    except Exception:
+                                        log.exception(
+                                            "Failed to save/send RSI feed alert for %s chat_id=%s",
+                                            candidate.symbol,
+                                            chat_id,
+                                        )
+
+                    if strategy_mode_enabled and sent_in_cycle < max_signals_per_cycle:
+                        try:
+                            bars = await fetch_recent_bars(symbol=symbol, timeframe=timeframe, limit=120)
+                            strategy_candidate = detect_pinbar_strategy_signal(
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                bars=bars,
+                                generated_at=snapshot.generated_at,
+                                market_type=market_type,
+                            )
+                        except BinanceCandlesError:
+                            strategy_candidate = None
+
+                        if not strategy_candidate:
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                decision="reject",
+                                reject_reason="reject_no_strategy_setup",
+                                payload={"timeframe": timeframe},
+                            )
+                            continue
+
+                        strategy_proxy = _FilterProxy(
+                            symbol=strategy_candidate.symbol,
+                            timeframe=strategy_candidate.timeframe,
+                            signal_type=(
+                                "post_pump_pullback_short"
+                                if strategy_candidate.direction == "short"
+                                else "post_dump_bounce_long"
+                            ),
+                            current_price=strategy_candidate.current_price,
+                        )
+                        accepted, reject = await filters.accept(strategy_proxy, scope=f"{chat_id}:strategy")
+                        if not accepted:
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
+                                timeframe=strategy_candidate.timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                decision="reject",
+                                reject_reason=reject.reason if reject else "reject_unknown",
+                                payload={"details": reject.details if reject else "-"},
+                            )
+                            continue
+
+                        strategy_direction = "down" if strategy_candidate.direction == "short" else "up"
+                        strategy_signal_type = (
+                            "post_pump_pullback_short"
+                            if strategy_candidate.direction == "short"
+                            else "post_dump_bounce_long"
+                        )
+                        try:
+                            await _save_feed_signal(
+                                client,
+                                {
+                                    "symbol": strategy_candidate.symbol,
+                                    "timeframe": strategy_candidate.timeframe,
+                                    "direction": strategy_direction,
+                                    "strength": 1.0,
+                                    "action": "entry",
+                                    "source": "cex",
+                                    "signal_type": strategy_signal_type,
+                                    "market_type": market_type,
+                                    "trigger_source": "pinbar_deviation",
+                                    "prev_price": strategy_candidate.baseline_price,
+                                    "price": strategy_candidate.current_price,
+                                    "last_price": strategy_candidate.current_price,
+                                    "quote_volume": snapshot.quote_volume_24h,
+                                    "reason": (
+                                        f"Стратегия pin bar: отклонение {strategy_candidate.deviation_pct:+.2f}% "
+                                        f"силa={strategy_candidate.pinbar_strength:.2f}"
+                                    ),
+                                },
+                            )
+                            await bot.send_message(chat_id, format_strategy_signal_card(strategy_candidate))
+                            sent_in_cycle += 1
+                            await _debug_scan_event(
+                                client,
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
+                                timeframe=strategy_candidate.timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                event="signal_sent",
+                                details={"signal_type": strategy_signal_type},
+                            )
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
+                                timeframe=strategy_candidate.timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                decision="accept",
+                                reject_reason=None,
+                                payload={"deviation_pct": strategy_candidate.deviation_pct},
+                            )
+                        except Exception:
+                            log.exception(
+                                "Failed to save/send strategy alert for %s chat_id=%s",
+                                strategy_candidate.symbol,
+                                chat_id,
+                            )
 
     return
 
@@ -451,7 +723,7 @@ async def main() -> None:
         redis_prefix=settings.signal_filter_redis_prefix,
     )
     shard_count = max(1, settings.worker_shard_count)
-    shard_index = settings.worker_shard_index % shard_count
+    shard_index = _resolve_shard_index(shard_count)
     log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
     last_prune_ts = 0.0
 

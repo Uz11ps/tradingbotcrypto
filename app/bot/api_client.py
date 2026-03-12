@@ -118,6 +118,10 @@ class ApiClient:
         active_timeframes: list[str] | None = None,
         min_price_move_pct: float | None = None,
         min_quote_volume: float | None = None,
+        signal_side_mode: str | None = None,
+        market_type: str | None = None,
+        feed_mode_enabled: bool | None = None,
+        strategy_mode_enabled: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if lower_rsi is not None:
@@ -130,7 +134,67 @@ class ApiClient:
             payload["min_price_move_pct"] = min_price_move_pct
         if min_quote_volume is not None:
             payload["min_quote_volume"] = min_quote_volume
+        if signal_side_mode is not None:
+            payload["signal_side_mode"] = signal_side_mode
+        if market_type is not None:
+            payload["market_type"] = market_type
+        if feed_mode_enabled is not None:
+            payload["feed_mode_enabled"] = feed_mode_enabled
+        if strategy_mode_enabled is not None:
+            payload["strategy_mode_enabled"] = strategy_mode_enabled
         r = await self._client.post("/user-settings", params={"chat_id": chat_id}, json=payload)
         r.raise_for_status()
         return r.json()
+
+    async def post_raw_candidate(
+        self,
+        *,
+        chat_id: int | None,
+        symbol: str,
+        timeframe: str,
+        market_type: str,
+        mode: str,
+        decision: str,
+        reject_reason: str | None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        r = await self._client.post(
+            "/telemetry/raw-candidates",
+            json={
+                "chat_id": chat_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "market_type": market_type,
+                "mode": mode,
+                "decision": decision,
+                "reject_reason": reject_reason,
+                "payload": payload,
+            },
+        )
+        r.raise_for_status()
+
+    async def post_scan_log(
+        self,
+        *,
+        chat_id: int | None,
+        symbol: str,
+        timeframe: str,
+        market_type: str,
+        mode: str,
+        event: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        r = await self._client.post(
+            "/telemetry/scan-logs",
+            json={
+                "chat_id": chat_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "market_type": market_type,
+                "mode": mode,
+                "event": event,
+                "details": details,
+            },
+        )
+        r.raise_for_status()
 

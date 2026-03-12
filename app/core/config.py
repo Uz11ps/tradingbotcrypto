@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     )
     redis_url: str = "redis://127.0.0.1:6379/0"
     worker_interval_seconds: int = 20
+    signal_worker_replicas: int = 4
     worker_shard_index: int = 0
     worker_shard_count: int = 1
     feed_universe_size: int = 300
@@ -50,6 +51,8 @@ class Settings(BaseSettings):
     signal_filter_redis_prefix: str = "signal_filter"
     signal_retention_days: int = 14
     signal_retention_prune_interval_seconds: int = 3600
+    signal_debug_full_enabled: bool = False
+    signal_debug_log_limit_per_cycle: int = 500
 
     log_level: str = "INFO"
 

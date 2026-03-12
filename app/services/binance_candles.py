@@ -48,6 +48,16 @@ class CandleSnapshot:
     generated_at: datetime
 
 
+@dataclass(slots=True)
+class KlineBar:
+    open_time_ms: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
 def _pct_change(prev_value: float, current_value: float) -> float:
     if prev_value == 0:
         return 0.0
@@ -111,6 +121,45 @@ async def fetch_closes_and_volumes(
     if len(closes) < 30 or len(volumes) < 30:
         raise BinanceCandlesError(f"Not enough closes for {symbol} {timeframe}")
     return closes, volumes
+
+
+async def fetch_recent_bars(
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int = 120,
+) -> list[KlineBar]:
+    interval = TIMEFRAME_MAP.get(timeframe)
+    if not interval:
+        raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
+
+    pair = _to_bingx_symbol(symbol)
+    response = await _request_with_retry(
+        BINGX_KLINES_URL,
+        {"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
+        label=f"bingx bars {symbol} {timeframe}",
+    )
+    raw_payload: dict[str, Any] = response.json()
+    if int(raw_payload.get("code", -1)) != 0:
+        raise BinanceCandlesError(f"bingx bars error: {raw_payload}")
+    payload: list[list[Any]] = raw_payload.get("data") or []
+    bars: list[KlineBar] = []
+    for row in payload:
+        if len(row) <= 5:
+            continue
+        bars.append(
+            KlineBar(
+                open_time_ms=int(row[0]),
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+            )
+        )
+    if len(bars) < 30:
+        raise BinanceCandlesError(f"Not enough bars for {symbol} {timeframe}")
+    return bars
 
 
 async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list[float]:

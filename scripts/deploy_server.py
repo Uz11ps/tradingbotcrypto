@@ -35,6 +35,7 @@ class DeployConfig:
     signal_repeat_guard_min_rsi_delta: float
     signal_retention_days: int
     signal_retention_prune_interval_seconds: int
+    signal_worker_replicas: int
 
 
 class Deployer:
@@ -111,8 +112,9 @@ class Deployer:
             f"SIGNAL_REPEAT_GUARD_MIN_RSI_DELTA={self.cfg.signal_repeat_guard_min_rsi_delta}\n"
             f"SIGNAL_RETENTION_DAYS={self.cfg.signal_retention_days}\n"
             f"SIGNAL_RETENTION_PRUNE_INTERVAL_SECONDS={self.cfg.signal_retention_prune_interval_seconds}\n"
-            "WORKER_SHARD_INDEX=0\n"
-            "WORKER_SHARD_COUNT=3\n"
+            "WORKER_SHARD_INDEX=-1\n"
+            f"WORKER_SHARD_COUNT={max(1, self.cfg.signal_worker_replicas)}\n"
+            "SIGNAL_DEBUG_FULL_ENABLED=true\n"
             "SIGNAL_FILTER_REDIS_PREFIX=signal_filter\n"
             f"API_PORT={self.cfg.api_port}\n"
             f"POSTGRES_PORT={self.cfg.postgres_port}\n"
@@ -126,7 +128,8 @@ class Deployer:
         self.run(f"cd '{self.cfg.deploy_dir}' && docker compose down || true")
         self.run(
             f"cd '{self.cfg.deploy_dir}' && "
-            "docker compose --profile worker up -d --build --remove-orphans"
+            "docker compose --profile worker up -d --build --remove-orphans "
+            f"--scale signal_worker={max(1, self.cfg.signal_worker_replicas)}"
         )
 
     def status(self) -> str:
@@ -159,6 +162,7 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--signal-repeat-guard-min-rsi-delta", default=2.0, type=float, help="Block stale repeats if RSI delta is below this value")
     parser.add_argument("--signal-retention-days", default=14, type=int, help="How many days of signals to keep")
     parser.add_argument("--signal-retention-prune-interval-seconds", default=3600, type=int, help="How often worker prunes old signals")
+    parser.add_argument("--signal-worker-replicas", default=4, type=int, help="Number of worker replicas")
     args = parser.parse_args()
 
     return DeployConfig(
@@ -183,6 +187,7 @@ def parse_args() -> DeployConfig:
         signal_repeat_guard_min_rsi_delta=args.signal_repeat_guard_min_rsi_delta,
         signal_retention_days=args.signal_retention_days,
         signal_retention_prune_interval_seconds=args.signal_retention_prune_interval_seconds,
+        signal_worker_replicas=args.signal_worker_replicas,
     )
 
 

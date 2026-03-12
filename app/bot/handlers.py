@@ -3,14 +3,18 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
 from app.bot.api_client import ApiClient
 from app.bot.keyboards import (
     feed_kb,
     main_menu_kb,
+    market_type_kb,
     panel_actions_kb,
+    reset_confirm_kb,
+    signal_modes_kb,
     settings_main_kb,
+    signal_side_kb,
     timeframes_kb,
 )
 from app.bot.states import UserFlow
@@ -22,14 +26,17 @@ router = Router()
 def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     tfs = " ".join(cfg.get("active_timeframes", [])) or "15m"
     rsi = f"{float(cfg.get('upper_rsi', 60)):.0f}/{float(cfg.get('lower_rsi', 40)):.0f}"
-    trigger = (
-        f"{float(cfg.get('min_price_move_pct', 1.5)):.1f}% / "
-        f"{settings.signal_price_change_15m_trigger_pct:.1f}%"
-    )
-    feed_status = "Вкл"
+    trigger = f"≥ {float(cfg.get('min_price_move_pct', 5.0)):.1f}%"
+    side_map = {"all": "Pump+Dump", "pump": "Только Pump", "dump": "Только Dump"}
+    side_mode = side_map.get(str(cfg.get("signal_side_mode", "all")), "Pump+Dump")
+    market_map = {"spot": "Spot", "futures": "Futures", "both": "Spot+Futures"}
+    market_type = market_map.get(str(cfg.get("market_type", "both")), "Spot+Futures")
+    feed_status = "Вкл" if bool(cfg.get("feed_mode_enabled", True)) else "Выкл"
+    strategy_status = "Вкл" if bool(cfg.get("strategy_mode_enabled", True)) else "Выкл"
     return (
-        f"ТФ: {tfs} | Триггер: {trigger} | RSI: {rsi} | "
-        f"Пары: {universe} (≥${min_vol/1_000_000:.1f}M) | Лента: {feed_status}"
+        f"ТФ: {tfs} | Движение: {trigger} | Режим: {side_mode} | RSI: {rsi} | "
+        f"Рынок: {market_type} | Пары: {universe} (≥${min_vol/1_000_000:.1f}M) | "
+        f"Лента: {feed_status} | Стратегия: {strategy_status}"
     )
 
 
@@ -46,14 +53,21 @@ def _settings_text(cfg: dict[str, object]) -> str:
     lower_rsi = float(cfg.get("lower_rsi", 40))
     upper_rsi = float(cfg.get("upper_rsi", 60))
     min_vol = float(cfg.get("min_quote_volume", settings.bingx_min_quote_volume))
-    trigger_5m = float(cfg.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct))
-    trigger_15m = settings.signal_price_change_15m_trigger_pct
+    min_move = float(cfg.get("min_price_move_pct", 5.0))
+    side_map = {"all": "Все", "pump": "Только pump", "dump": "Только dump"}
+    side_mode = side_map.get(str(cfg.get("signal_side_mode", "all")), "Все")
+    market_map = {"spot": "Spot", "futures": "Futures", "both": "Spot + Futures"}
+    market_type = market_map.get(str(cfg.get("market_type", "both")), "Spot + Futures")
+    feed_mode_enabled = bool(cfg.get("feed_mode_enabled", True))
+    strategy_mode_enabled = bool(cfg.get("strategy_mode_enabled", True))
     return (
         "⚙️ Настройки сигналов\n\n"
         f"Таймфреймы: {active}\n"
-        "Триггер цены:\n"
-        f" 5m ≥ {trigger_5m:.1f}%\n"
-        f" 15m ≥ {trigger_15m:.1f}%\n\n"
+        f"Минимальное движение: ≥ {min_move:.1f}%\n"
+        f"Направление: {side_mode}\n"
+        f"Тип рынка: {market_type}\n"
+        f"Лента pump/dump: {'Вкл' if feed_mode_enabled else 'Выкл'}\n"
+        f"Сигналы стратегии: {'Вкл' if strategy_mode_enabled else 'Выкл'}\n\n"
         f"RSI:\n pump ≥ {upper_rsi:.0f}\n dump ≤ {lower_rsi:.0f}\n\n"
         f"Мин. объём 24h:\n ≥ ${min_vol:,.0f}"
     )
@@ -102,29 +116,41 @@ async def menu_settings(c: CallbackQuery, state: FSMContext, api: ApiClient) -> 
 
 
 @router.callback_query(F.data == "menu:feed")
-async def menu_feed(c: CallbackQuery) -> None:
+async def menu_feed(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    mode = str(cfg.get("signal_side_mode", "all"))
+    mode_label = {"all": "Pump + Dump", "pump": "Только Pump", "dump": "Только Dump"}.get(mode, "Pump + Dump")
     text = (
         "📡 Лента сигналов\n\n"
-        "Если включена — новые Pump/Dump сигналы\n"
-        "будут приходить в этот чат.\n\n"
-        "Статус: ВКЛЮЧЕНА"
+        "Новые сигналы приходят в этот чат.\n"
+        "Выберите направление внизу.\n\n"
+        f"Текущий режим: {mode_label}"
     )
-    await c.message.edit_text(text, reply_markup=feed_kb(enabled=True))
+    await c.message.edit_text(text, reply_markup=feed_kb(mode=mode))
     await c.answer()
 
 
-@router.callback_query(F.data.in_(["feed:on", "feed:off"]))
-async def feed_toggle(c: CallbackQuery) -> None:
-    enabled = c.data == "feed:on"
-    status = "ВКЛЮЧЕНА" if enabled else "ВЫКЛЮЧЕНА"
+@router.callback_query(F.data.in_(["feed:toggle:pump", "feed:toggle:dump"]))
+async def feed_toggle(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    current = str(cfg.get("signal_side_mode", "all"))
+    selected = c.data.rsplit(":", 1)[-1]
+
+    if selected == "pump":
+        next_mode = "all" if current == "dump" else "pump"
+    else:
+        next_mode = "all" if current == "pump" else "dump"
+
+    await api.update_user_settings(chat_id=c.message.chat.id, signal_side_mode=next_mode)
+    label = {"all": "Pump + Dump", "pump": "Только Pump", "dump": "Только Dump"}[next_mode]
     text = (
         "📡 Лента сигналов\n\n"
-        "Если включена — новые Pump/Dump сигналы\n"
-        "будут приходить в этот чат.\n\n"
-        f"Статус: {status}"
+        "Новые сигналы приходят в этот чат.\n"
+        "Выберите направление внизу.\n\n"
+        f"Текущий режим: {label}"
     )
-    await c.message.edit_text(text, reply_markup=feed_kb(enabled=enabled))
-    await c.answer("Статус ленты обновлён")
+    await c.message.edit_text(text, reply_markup=feed_kb(mode=next_mode))
+    await c.answer("Режим обновлён")
 
 
 @router.callback_query(F.data == "settings:tfs")
@@ -164,35 +190,28 @@ async def tfs_done(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
 
 @router.callback_query(F.data == "settings:trigger")
 async def settings_trigger(c: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(UserFlow.entering_price_triggers)
+    await state.set_state(UserFlow.entering_min_price_move)
     await c.message.edit_text(
-        "Введите два числа через пробел:\n5m 15m (%)\n\nПример:\n2.5 4.5",
+        "Введите минимальное движение в %.\n\nПримеры:\n5\n10\n15",
         reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
 
-@router.message(UserFlow.entering_price_triggers)
-async def handle_price_triggers(m: Message, state: FSMContext, api: ApiClient) -> None:
-    parts = m.text.strip().replace(",", ".").split()
-    if len(parts) != 2:
-        await m.answer("Нужно два числа через пробел. Пример: 2.5 4.5")
-        return
+@router.message(UserFlow.entering_min_price_move)
+async def handle_min_price_move(m: Message, state: FSMContext, api: ApiClient) -> None:
     try:
-        pct_5m = float(parts[0])
-        _pct_15m = float(parts[1])
+        min_move = float(m.text.strip().replace(",", "."))
     except ValueError:
-        await m.answer("Не смог прочитать числа. Пример: 2.5 4.5")
+        await m.answer("Не смог прочитать число. Пример: 5 или 10")
+        return
+    if min_move <= 0:
+        await m.answer("Значение должно быть больше 0")
         return
     await state.set_state(UserFlow.main)
-    try:
-        await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=pct_5m)
-        saved_5m = True
-    except Exception:
-        saved_5m = False
+    await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=min_move)
     await m.answer(
-        f"{'Сохранено' if saved_5m else 'Не удалось сохранить'}: 5m={pct_5m:.2f}%."
-        f"\n15m сейчас: {settings.signal_price_change_15m_trigger_pct:.1f}%.",
+        f"Сохранено: минимальное движение ≥ {min_move:.1f}%",
         reply_markup=main_menu_kb(),
     )
 
@@ -269,15 +288,8 @@ async def handle_volume(m: Message, state: FSMContext, api: ApiClient) -> None:
 async def settings_reset(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.confirming_reset)
     await c.message.edit_text(
-        "Сбросить настройки на дефолт?\n2.5% / 4.5%, RSI 60/40, объём $500K, ТФ 15m",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Да", callback_data="reset:yes"),
-                    InlineKeyboardButton(text="Нет", callback_data="reset:no"),
-                ]
-            ]
-        ),
+        "Сбросить настройки на дефолт?\nДвижение 5.0%, режим Все, рынок Spot+Futures, RSI 60/40, объём $500K, ТФ 15m, лента+стратегия включены",
+        reply_markup=reset_confirm_kb(),
     )
     await c.answer()
 
@@ -289,7 +301,12 @@ async def reset_yes(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None
         lower_rsi=40.0,
         upper_rsi=60.0,
         active_timeframes=["15m"],
+        min_price_move_pct=5.0,
         min_quote_volume=500_000.0,
+        signal_side_mode="all",
+        market_type="both",
+        feed_mode_enabled=True,
+        strategy_mode_enabled=True,
     )
     await state.set_state(UserFlow.main)
     await _render_settings(c, api)
@@ -308,9 +325,101 @@ async def reset_no(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
 async def menu_info(c: CallbackQuery) -> None:
     text = (
         "Информация\n\n"
-        "Бот отслеживает рынок BingX и отправляет поток Pump/Dump сигналов.\n"
-        "Чтобы получать сигналы чаще, включите больше таймфреймов в настройках."
+        "Бот отслеживает рынок BingX и отправляет два типа сигналов:\n"
+        "1) Лента pump/dump\n"
+        "2) Сигналы стратегии (pin bar + отклонение)\n\n"
+        "Чтобы получать сигналы чаще, увеличьте число таймфреймов и проверьте тип рынка в настройках."
     )
     await c.message.edit_text(text, reply_markup=panel_actions_kb())
     await c.answer()
+
+
+@router.callback_query(F.data == "settings:side")
+async def settings_side(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    mode = str(cfg.get("signal_side_mode", "all"))
+    await state.set_state(UserFlow.choosing_signal_side)
+    await c.message.edit_text(
+        "Выберите направление сигналов:",
+        reply_markup=signal_side_kb(mode),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("side:set:"), UserFlow.choosing_signal_side)
+async def set_side_mode(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    mode = c.data.split(":")[-1]
+    if mode not in {"all", "pump", "dump"}:
+        await c.answer("Неизвестный режим")
+        return
+    await api.update_user_settings(chat_id=c.message.chat.id, signal_side_mode=mode)
+    await state.set_state(UserFlow.main)
+    await _render_settings(c, api)
+    await c.answer("Режим направления обновлён")
+
+
+@router.callback_query(F.data == "settings:market")
+async def settings_market(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    market_type = str(cfg.get("market_type", "both"))
+    await state.set_state(UserFlow.choosing_market_type)
+    await c.message.edit_text(
+        "Выберите тип рынка:",
+        reply_markup=market_type_kb(market_type),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("market:set:"), UserFlow.choosing_market_type)
+async def set_market_mode(c: CallbackQuery, state: FSMContext, api: ApiClient) -> None:
+    mode = c.data.split(":")[-1]
+    if mode not in {"spot", "futures", "both"}:
+        await c.answer("Неизвестный тип рынка")
+        return
+    await api.update_user_settings(chat_id=c.message.chat.id, market_type=mode)
+    await state.set_state(UserFlow.main)
+    await _render_settings(c, api)
+    await c.answer("Тип рынка обновлён")
+
+
+@router.callback_query(F.data == "settings:modes")
+async def settings_modes(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    feed_mode_enabled = bool(cfg.get("feed_mode_enabled", True))
+    strategy_mode_enabled = bool(cfg.get("strategy_mode_enabled", True))
+    await c.message.edit_text(
+        "Выберите активные режимы сигналов:",
+        reply_markup=signal_modes_kb(
+            feed_mode_enabled=feed_mode_enabled,
+            strategy_mode_enabled=strategy_mode_enabled,
+        ),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data.in_(["modes:toggle:feed", "modes:toggle:strategy"]))
+async def modes_toggle(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    feed_mode_enabled = bool(cfg.get("feed_mode_enabled", True))
+    strategy_mode_enabled = bool(cfg.get("strategy_mode_enabled", True))
+    selected = c.data.rsplit(":", 1)[-1]
+
+    if selected == "feed":
+        feed_mode_enabled = not feed_mode_enabled
+    else:
+        strategy_mode_enabled = not strategy_mode_enabled
+
+    await api.update_user_settings(
+        chat_id=c.message.chat.id,
+        feed_mode_enabled=feed_mode_enabled,
+        strategy_mode_enabled=strategy_mode_enabled,
+    )
+    await c.message.edit_text(
+        "Выберите активные режимы сигналов:",
+        reply_markup=signal_modes_kb(
+            feed_mode_enabled=feed_mode_enabled,
+            strategy_mode_enabled=strategy_mode_enabled,
+        ),
+    )
+    await c.answer("Режимы обновлены")
 

@@ -15,6 +15,7 @@ class SignalOut(BaseModel):
     action: str
     source: str = "hybrid"
     signal_type: str | None = None
+    market_type: str | None = None
     trigger_source: str | None = None
     rsi_value: float | None = None
     prev_price: float | None = None
@@ -22,6 +23,7 @@ class SignalOut(BaseModel):
     volume: float | None = None
     liquidity: float | None = None
     reason: str | None = None
+    recommendation: str
 
 
 class SignalCreate(BaseModel):
@@ -32,6 +34,7 @@ class SignalCreate(BaseModel):
     action: str
     source: str = "hybrid"
     signal_type: str | None = None
+    market_type: str | None = None
     trigger_source: str | None = None
     rsi_value: float | None = None
     prev_price: float | None = None
@@ -67,6 +70,7 @@ class LiveSignalOut(BaseModel):
     summary: str
     ai_score: float
     ai_explanation: str
+    recommendation: str
 
 
 class StatsOverviewOut(BaseModel):
@@ -142,6 +146,7 @@ class FeedMoverOut(BaseModel):
     prev_price: float
     current_price: float
     generated_at: datetime
+    recommendation: str
 
 
 class FeedOut(BaseModel):
@@ -156,6 +161,10 @@ class UserSignalSettingsUpdate(BaseModel):
     active_timeframes: list[str] | None = None
     min_price_move_pct: float | None = None
     min_quote_volume: float | None = None
+    signal_side_mode: str | None = None
+    market_type: str | None = None
+    feed_mode_enabled: bool | None = None
+    strategy_mode_enabled: bool | None = None
 
 
 class UserSignalSettingsOut(BaseModel):
@@ -165,4 +174,29 @@ class UserSignalSettingsOut(BaseModel):
     active_timeframes: list[str]
     min_price_move_pct: float
     min_quote_volume: float
+    signal_side_mode: str
+    market_type: str
+    feed_mode_enabled: bool
+    strategy_mode_enabled: bool
+
+
+class RawCandidateIn(BaseModel):
+    chat_id: int | None = None
+    symbol: str
+    timeframe: str
+    market_type: str
+    mode: str
+    decision: str
+    reject_reason: str | None = None
+    payload: dict[str, object] | None = None
+
+
+class ScanLogIn(BaseModel):
+    chat_id: int | None = None
+    symbol: str
+    timeframe: str
+    market_type: str
+    mode: str
+    event: str
+    details: dict[str, object] | None = None
 

@@ -60,47 +60,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  signal_worker_1:
+  signal_worker:
     build: .
     env_file:
       - path: .env
         required: false
     environment:
       API_PUBLIC_BASE_URL: http://api:8000
-      WORKER_SHARD_INDEX: 0
-      WORKER_SHARD_COUNT: 3
-    command: python -m app.workers.mock_signal_worker
-    depends_on:
-      api:
-        condition: service_started
-    profiles: ["worker"]
-    restart: unless-stopped
-
-  signal_worker_2:
-    build: .
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      API_PUBLIC_BASE_URL: http://api:8000
-      WORKER_SHARD_INDEX: 1
-      WORKER_SHARD_COUNT: 3
-    command: python -m app.workers.mock_signal_worker
-    depends_on:
-      api:
-        condition: service_started
-    profiles: ["worker"]
-    restart: unless-stopped
-
-  signal_worker_3:
-    build: .
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      API_PUBLIC_BASE_URL: http://api:8000
-      WORKER_SHARD_INDEX: 2
-      WORKER_SHARD_COUNT: 3
+      WORKER_SHARD_INDEX: ${WORKER_SHARD_INDEX:--1}
+      WORKER_SHARD_COUNT: ${WORKER_SHARD_COUNT:-4}
+      SIGNAL_DEBUG_FULL_ENABLED: ${SIGNAL_DEBUG_FULL_ENABLED:-false}
     command: python -m app.workers.mock_signal_worker
     depends_on:
       api:
