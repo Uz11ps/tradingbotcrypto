@@ -165,6 +165,7 @@ class UserSignalSettingsUpdate(BaseModel):
     market_type: str | None = None
     feed_mode_enabled: bool | None = None
     strategy_mode_enabled: bool | None = None
+    rsi_enabled: bool | None = None
 
 
 class UserSignalSettingsOut(BaseModel):
@@ -178,6 +179,7 @@ class UserSignalSettingsOut(BaseModel):
     market_type: str
     feed_mode_enabled: bool
     strategy_mode_enabled: bool
+    rsi_enabled: bool
 
 
 class RawCandidateIn(BaseModel):

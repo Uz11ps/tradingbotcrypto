@@ -657,6 +657,7 @@ async def get_user_settings(
         market_type=effective.market_type,
         feed_mode_enabled=effective.feed_mode_enabled,
         strategy_mode_enabled=effective.strategy_mode_enabled,
+        rsi_enabled=effective.rsi_enabled,
     )
 
 
@@ -678,6 +679,7 @@ async def update_user_settings(
         market_type=payload.market_type,
         feed_mode_enabled=payload.feed_mode_enabled,
         strategy_mode_enabled=payload.strategy_mode_enabled,
+        rsi_enabled=payload.rsi_enabled,
     )
     return UserSignalSettingsOut(
         chat_id=chat_id,
@@ -690,6 +692,7 @@ async def update_user_settings(
         market_type=effective.market_type,
         feed_mode_enabled=effective.feed_mode_enabled,
         strategy_mode_enabled=effective.strategy_mode_enabled,
+        rsi_enabled=effective.rsi_enabled,
     )
 
 
@@ -703,6 +706,13 @@ async def list_user_settings_chats(session: AsyncSession = Depends(get_session))
 async def ai_tune(session: AsyncSession = Depends(get_session)) -> dict[str, float]:
     settings = await tune_strategy_from_history(session, last_n=200)
     return settings
+
+
+@router.post("/maintenance/clear-memory")
+async def clear_memory_cache() -> dict[str, str]:
+    import gc
+    gc.collect()
+    return {"status": "ok", "message": "Memory cleared"}
 
 
 @router.post("/maintenance/prune-signals")

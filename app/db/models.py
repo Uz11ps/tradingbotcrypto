@@ -101,6 +101,7 @@ class UserSignalSettings(Base):
     market_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     feed_mode_enabled: Mapped[bool] = mapped_column(default=True)
     strategy_mode_enabled: Mapped[bool] = mapped_column(default=True)
+    rsi_enabled: Mapped[bool] = mapped_column(default=True)
 
 
 class RawCandidate(Base):

@@ -26,6 +26,7 @@ class EffectiveUserSettings:
     market_type: str
     feed_mode_enabled: bool
     strategy_mode_enabled: bool
+    rsi_enabled: bool
 
 
 def _parse_tfs(raw: str | None) -> list[str]:
@@ -48,6 +49,7 @@ def get_global_defaults() -> EffectiveUserSettings:
         market_type="both",
         feed_mode_enabled=True,
         strategy_mode_enabled=True,
+        rsi_enabled=True,
     )
 
 
@@ -89,6 +91,11 @@ async def get_effective_settings(
             if row.strategy_mode_enabled is not None
             else defaults.strategy_mode_enabled
         ),
+        rsi_enabled=(
+            bool(row.rsi_enabled)
+            if row.rsi_enabled is not None
+            else defaults.rsi_enabled
+        ),
     )
 
 
@@ -105,6 +112,7 @@ async def upsert_user_settings(
     market_type: str | None = None,
     feed_mode_enabled: bool | None = None,
     strategy_mode_enabled: bool | None = None,
+    rsi_enabled: bool | None = None,
 ) -> EffectiveUserSettings:
     row = await session.scalar(select(UserSignalSettings).where(UserSignalSettings.chat_id == chat_id))
     if not row:
@@ -129,6 +137,8 @@ async def upsert_user_settings(
         row.feed_mode_enabled = bool(feed_mode_enabled)
     if strategy_mode_enabled is not None:
         row.strategy_mode_enabled = bool(strategy_mode_enabled)
+    if rsi_enabled is not None:
+        row.rsi_enabled = bool(rsi_enabled)
 
     await session.commit()
     await session.refresh(row)

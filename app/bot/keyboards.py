@@ -8,10 +8,7 @@ DEFAULT_TIMEFRAMES: list[str] = ["5m", "15m", "1h", "4h"]
 def _persistent_bottom_rows() -> list[list[InlineKeyboardButton]]:
     return [
         [InlineKeyboardButton(text="ℹ️ Текущие настройки", callback_data="menu:status")],
-        [
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
-            InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:home"),
-        ],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu:home")],
     ]
 
 
@@ -147,6 +144,18 @@ def reset_confirm_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Да", callback_data="reset:yes"),
                 InlineKeyboardButton(text="Нет", callback_data="reset:no"),
             ],
+            *_persistent_bottom_rows(),
+        ]
+    )
+
+
+def rsi_settings_kb(rsi_enabled: bool, lower_rsi: float, upper_rsi: float) -> InlineKeyboardMarkup:
+    toggle_text = "✅ RSI включен" if rsi_enabled else "⬜ RSI выключен"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_text, callback_data="rsi:toggle")],
+            [InlineKeyboardButton(text=f"Pump RSI ≥ {upper_rsi:.0f}", callback_data="rsi:upper")],
+            [InlineKeyboardButton(text=f"Dump RSI ≤ {lower_rsi:.0f}", callback_data="rsi:lower")],
             *_persistent_bottom_rows(),
         ]
     )

@@ -12,6 +12,7 @@ from app.bot.keyboards import (
     market_type_kb,
     panel_actions_kb,
     reset_confirm_kb,
+    rsi_settings_kb,
     signal_modes_kb,
     settings_main_kb,
     signal_side_kb,
@@ -25,7 +26,13 @@ router = Router()
 
 def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     tfs = " ".join(cfg.get("active_timeframes", [])) or "15m"
-    rsi = f"{float(cfg.get('upper_rsi', 60)):.0f}/{float(cfg.get('lower_rsi', 40)):.0f}"
+    rsi_enabled = bool(cfg.get("rsi_enabled", True))
+    if rsi_enabled:
+        upper_rsi = float(cfg.get('upper_rsi', 60))
+        lower_rsi = float(cfg.get('lower_rsi', 40))
+        rsi = f"Вкл ({upper_rsi:.0f}/{lower_rsi:.0f})"
+    else:
+        rsi = "Выкл"
     trigger = f"≥ {float(cfg.get('min_price_move_pct', 5.0)):.1f}%"
     side_map = {"all": "Pump+Dump", "pump": "Только Pump", "dump": "Только Dump"}
     side_mode = side_map.get(str(cfg.get("signal_side_mode", "all")), "Pump+Dump")
@@ -228,33 +235,87 @@ async def handle_min_price_move(m: Message, state: FSMContext, api: ApiClient) -
 
 
 @router.callback_query(F.data == "settings:rsi")
-async def settings_rsi(c: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(UserFlow.entering_rsi)
+async def settings_rsi(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    rsi_enabled = bool(cfg.get("rsi_enabled", True))
+    lower_rsi = float(cfg.get("lower_rsi", 40))
+    upper_rsi = float(cfg.get("upper_rsi", 60))
+    status = "включен" if rsi_enabled else "выключен"
     await c.message.edit_text(
-        "Введите RSI pump и dump через пробел\nПример:\n60 40",
+        f"⚙️ Настройки RSI\n\nСтатус: RSI {status}\nPump: RSI ≥ {upper_rsi:.0f}\nDump: RSI ≤ {lower_rsi:.0f}",
+        reply_markup=rsi_settings_kb(rsi_enabled, lower_rsi, upper_rsi),
+    )
+    await c.answer()
+
+
+@router.callback_query(F.data == "rsi:toggle")
+async def rsi_toggle(c: CallbackQuery, api: ApiClient) -> None:
+    cfg = await api.get_user_settings(chat_id=c.message.chat.id)
+    current = bool(cfg.get("rsi_enabled", True))
+    new_value = not current
+    await api.update_user_settings(chat_id=c.message.chat.id, rsi_enabled=new_value)
+    status = "включен" if new_value else "выключен"
+    lower_rsi = float(cfg.get("lower_rsi", 40))
+    upper_rsi = float(cfg.get("upper_rsi", 60))
+    await c.message.edit_text(
+        f"⚙️ Настройки RSI\n\nСтатус: RSI {status}\nPump: RSI ≥ {upper_rsi:.0f}\nDump: RSI ≤ {lower_rsi:.0f}",
+        reply_markup=rsi_settings_kb(new_value, lower_rsi, upper_rsi),
+    )
+    await c.answer(f"RSI {status}")
+
+
+@router.callback_query(F.data == "rsi:upper")
+async def rsi_upper(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.entering_rsi_upper)
+    await c.message.edit_text(
+        "Введите RSI для pump (обычно 60-70)\nПример: 60",
         reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
 
-@router.message(UserFlow.entering_rsi)
-async def handle_rsi(m: Message, state: FSMContext, api: ApiClient) -> None:
-    parts = m.text.strip().split()
-    if len(parts) != 2:
-        await m.answer("Нужно два числа через пробел. Пример: 60 40")
-        return
+@router.message(UserFlow.entering_rsi_upper)
+async def handle_rsi_upper(m: Message, state: FSMContext, api: ApiClient) -> None:
     try:
-        pump, dump = float(parts[0]), float(parts[1])
+        value = float(m.text.strip())
     except ValueError:
-        await m.answer("Не смог прочитать числа. Пример: 60 40")
+        await m.answer("Не смог прочитать число. Пример: 60")
         return
-    if pump <= dump:
-        await m.answer("RSI pump должен быть больше RSI dump")
+    if value < 50 or value > 100:
+        await m.answer("RSI pump должен быть между 50 и 100")
         return
-    await api.update_user_settings(chat_id=m.chat.id, upper_rsi=pump, lower_rsi=dump)
+    await api.update_user_settings(chat_id=m.chat.id, upper_rsi=value)
     await state.set_state(UserFlow.main)
     await m.answer(
-        f"RSI обновлён: pump ≥ {pump:.0f}, dump ≤ {dump:.0f}",
+        f"RSI pump обновлён: ≥ {value:.0f}",
+        reply_markup=main_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "rsi:lower")
+async def rsi_lower(c: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UserFlow.entering_rsi_lower)
+    await c.message.edit_text(
+        "Введите RSI для dump (обычно 30-40)\nПример: 40",
+        reply_markup=panel_actions_kb(),
+    )
+    await c.answer()
+
+
+@router.message(UserFlow.entering_rsi_lower)
+async def handle_rsi_lower(m: Message, state: FSMContext, api: ApiClient) -> None:
+    try:
+        value = float(m.text.strip())
+    except ValueError:
+        await m.answer("Не смог прочитать число. Пример: 40")
+        return
+    if value < 0 or value > 50:
+        await m.answer("RSI dump должен быть между 0 и 50")
+        return
+    await api.update_user_settings(chat_id=m.chat.id, lower_rsi=value)
+    await state.set_state(UserFlow.main)
+    await m.answer(
+        f"RSI dump обновлён: ≤ {value:.0f}",
         reply_markup=main_menu_kb(),
     )
 

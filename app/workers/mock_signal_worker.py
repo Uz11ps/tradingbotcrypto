@@ -412,6 +412,7 @@ async def _run_rsi_mode(
         market_types = _resolve_market_types(str(effective.get("market_type", "both")))
         feed_mode_enabled = bool(effective.get("feed_mode_enabled", True))
         strategy_mode_enabled = bool(effective.get("strategy_mode_enabled", True))
+        rsi_enabled = bool(effective.get("rsi_enabled", True))
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for market_type in market_types:
@@ -487,11 +488,16 @@ async def _run_rsi_mode(
                                 },
                             )
                         else:
-                            is_valid, reject_reason = validate_candidate_filters(
-                                candidate,
-                                lower_rsi=lower_rsi,
-                                upper_rsi=upper_rsi,
-                            )
+                            # If RSI is disabled, skip RSI validation
+                            if rsi_enabled:
+                                is_valid, reject_reason = validate_candidate_filters(
+                                    candidate,
+                                    lower_rsi=lower_rsi,
+                                    upper_rsi=upper_rsi,
+                                )
+                            else:
+                                is_valid, reject_reason = True, None
+                            
                             if (not is_valid) or abs(candidate.pct_change) < trigger_5m:
                                 await _debug_raw_candidate(
                                     client,
@@ -735,21 +741,23 @@ async def main() -> None:
                 await _run_legacy_mode(client, bot)
 
             await _tune_ai(client)
-            loop_time = asyncio.get_running_loop().time()
-            if (
-                settings.signal_retention_prune_interval_seconds > 0
-                and (loop_time - last_prune_ts) >= settings.signal_retention_prune_interval_seconds
-            ):
-                try:
-                    deleted = await _prune_old_signals(client)
-                    log.info(
-                        "Signal retention prune done: days=%s deleted=%s",
-                        settings.signal_retention_days,
-                        deleted,
-                    )
-                    last_prune_ts = loop_time
-                except Exception:
-                    log.exception("Signal retention prune failed")
+            # Only shard 0 runs retention cleanup to avoid duplicate work
+            if shard_index == 0:
+                loop_time = asyncio.get_running_loop().time()
+                if (
+                    settings.signal_retention_prune_interval_seconds > 0
+                    and (loop_time - last_prune_ts) >= settings.signal_retention_prune_interval_seconds
+                ):
+                    try:
+                        deleted = await _prune_old_signals(client)
+                        log.info(
+                            "Signal retention prune done: days=%s deleted=%s",
+                            settings.signal_retention_days,
+                            deleted,
+                        )
+                        last_prune_ts = loop_time
+                    except Exception:
+                        log.exception("Signal retention prune failed")
 
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:

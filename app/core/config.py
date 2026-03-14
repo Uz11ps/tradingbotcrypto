@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     signal_repeat_guard_min_move_pct: float = 0.4
     signal_repeat_guard_min_rsi_delta: float = 2.0
     signal_filter_redis_prefix: str = "signal_filter"
-    signal_retention_days: int = 14
-    signal_retention_prune_interval_seconds: int = 3600
+    signal_retention_days: int = 3
+    signal_retention_prune_interval_seconds: int = 1800
     signal_debug_full_enabled: bool = False
     signal_debug_log_limit_per_cycle: int = 500
 

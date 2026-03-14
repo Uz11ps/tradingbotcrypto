@@ -34,4 +34,11 @@ async def init_db() -> None:
                 "WHERE strategy_mode_enabled IS NULL"
             )
         )
+        await conn.execute(text("ALTER TABLE user_signal_settings ADD COLUMN IF NOT EXISTS rsi_enabled BOOLEAN DEFAULT TRUE"))
+        await conn.execute(
+            text(
+                "UPDATE user_signal_settings SET rsi_enabled = TRUE "
+                "WHERE rsi_enabled IS NULL"
+            )
+        )
 
