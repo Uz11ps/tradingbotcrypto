@@ -15,6 +15,7 @@ from app.core.logging import setup_logging
 from app.services.binance_candles import (
     BinanceCandlesError,
     build_snapshot,
+    fetch_live_price,
     fetch_recent_bars,
 )
 from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
@@ -208,6 +209,12 @@ async def _debug_raw_candidate(
 ) -> None:
     if not settings.signal_debug_full_enabled:
         return
+    if decision == "reject":
+        sample_rate = max(0.0, min(float(settings.signal_debug_reject_sample_rate), 1.0))
+        if sample_rate <= 0:
+            return
+        if sample_rate < 1.0 and random.random() > sample_rate:
+            return
     try:
         await client.post(
             "/telemetry/raw-candidates",
@@ -410,27 +417,32 @@ async def _run_rsi_mode(
         )
         side_mode = str(effective.get("signal_side_mode", "all"))
         market_types = _resolve_market_types(str(effective.get("market_type", "both")))
+        if not settings.signal_enable_futures_adapter:
+            has_futures = "futures" in market_types
+            market_types = [m for m in market_types if m != "futures"]
+            if has_futures:
+                log.info(
+                    "RSI mode: futures excluded from scan loop because adapter is disabled, chat_id=%s",
+                    chat_id,
+                )
+                await _debug_scan_event(
+                    client,
+                    chat_id=chat_id,
+                    symbol="-",
+                    timeframe="-",
+                    market_type="futures",
+                    mode="system",
+                    event="futures_excluded_adapter_disabled",
+                    details={"chat_id": chat_id},
+                )
+        if not market_types:
+            continue
         feed_mode_enabled = bool(effective.get("feed_mode_enabled", True))
         strategy_mode_enabled = bool(effective.get("strategy_mode_enabled", True))
         rsi_enabled = bool(effective.get("rsi_enabled", True))
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for market_type in market_types:
-            if market_type == "futures":
-                # Futures stream adapter will be introduced separately; keep mode configurable now.
-                log.info("RSI mode: futures selected but adapter not configured yet, chat_id=%s", chat_id)
-                await _debug_scan_event(
-                    client,
-                    chat_id=chat_id,
-                    symbol="-",
-                    timeframe="-",
-                    market_type=market_type,
-                    mode="system",
-                    event="futures_adapter_not_configured",
-                    details={"chat_id": chat_id},
-                )
-                continue
-
             for timeframe in active_timeframes:
                 for symbol in shard_symbols:
                     if sent_in_cycle >= max_signals_per_cycle:
@@ -498,7 +510,11 @@ async def _run_rsi_mode(
                             else:
                                 is_valid, reject_reason = True, None
                             
-                            if (not is_valid) or abs(candidate.pct_change) < trigger_5m:
+                            min_move_blocked = (
+                                (not settings.signal_disable_double_min_move_filter)
+                                and abs(candidate.pct_change) < trigger_5m
+                            )
+                            if (not is_valid) or min_move_blocked:
                                 await _debug_raw_candidate(
                                     client,
                                     chat_id=chat_id,
@@ -507,7 +523,11 @@ async def _run_rsi_mode(
                                     market_type=market_type,
                                     mode="feed",
                                     decision="reject",
-                                    reject_reason=reject_reason or "reject_user_min_move",
+                                    reject_reason=(
+                                        "reject_user_min_move"
+                                        if min_move_blocked
+                                        else (reject_reason or "reject_rsi_filter")
+                                    ),
                                     payload={
                                         "pct_change": candidate.pct_change,
                                         "rsi": candidate.rsi_value,
@@ -540,6 +560,16 @@ async def _run_rsi_mode(
                                         payload={"details": reject.details if reject else "-"},
                                     )
                                 else:
+                                    live_price: float | None = None
+                                    if settings.signal_live_price_enabled:
+                                        try:
+                                            live_price = await fetch_live_price(
+                                                symbol=candidate.symbol,
+                                                cache_ttl_seconds=settings.signal_live_price_cache_ttl_seconds,
+                                            )
+                                        except Exception:
+                                            # Keep candle-based trigger and signal delivery resilient.
+                                            live_price = None
                                     payload = {
                                         "symbol": candidate.symbol,
                                         "timeframe": candidate.timeframe,
@@ -555,7 +585,7 @@ async def _run_rsi_mode(
                                         "price": candidate.current_price,
                                         "volume": snapshot.quote_volume_24h,
                                         "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
-                                        "last_price": candidate.current_price,
+                                        "last_price": live_price if live_price is not None else candidate.current_price,
                                         "quote_volume": snapshot.quote_volume_24h,
                                     }
                                     if candidate.rsi_divergence_type and candidate.rsi_divergence_pct is not None:
@@ -565,7 +595,10 @@ async def _run_rsi_mode(
                                         )
                                     try:
                                         await _save_feed_signal(client, payload)
-                                        await bot.send_message(chat_id, format_signal_card(candidate))
+                                        await bot.send_message(
+                                            chat_id,
+                                            format_signal_card(candidate, live_price=live_price),
+                                        )
                                         sent_in_cycle += 1
                                         await _debug_scan_event(
                                             client,
@@ -727,6 +760,9 @@ async def main() -> None:
         repeat_guard_min_rsi_delta=settings.signal_repeat_guard_min_rsi_delta,
         redis_url=settings.redis_url,
         redis_prefix=settings.signal_filter_redis_prefix,
+        memory_state_ttl_seconds=settings.signal_filter_memory_state_ttl_seconds,
+        memory_state_max_keys=settings.signal_filter_memory_state_max_keys,
+        memory_gc_interval_seconds=settings.signal_filter_memory_gc_interval_seconds,
     )
     shard_count = max(1, settings.worker_shard_count)
     shard_index = _resolve_shard_index(shard_count)

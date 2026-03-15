@@ -27,6 +27,8 @@ MAX_RETRIES = 2
 RETRY_BACKOFF = 1.5
 
 log = logging.getLogger(__name__)
+_LIVE_PRICE_CACHE: dict[str, tuple[float, float]] = {}
+_LIVE_PRICE_CACHE_LOCK = asyncio.Lock()
 
 
 class BinanceCandlesError(RuntimeError):
@@ -211,6 +213,48 @@ async def fetch_quote_volume_24h_map(*, symbols: list[str]) -> dict[str, float]:
         if pair in normalized:
             out[normalized[pair]] = float(row.get("quoteVolume", 0.0) or 0.0)
     return out
+
+
+async def fetch_live_price(
+    *,
+    symbol: str,
+    cache_ttl_seconds: float = 1.5,
+) -> float:
+    pair = _to_bingx_symbol(symbol)
+    now_ts = datetime.now(tz=UTC).timestamp()
+    ttl = max(0.0, cache_ttl_seconds)
+    if ttl > 0:
+        cached = _LIVE_PRICE_CACHE.get(pair)
+        if cached and (now_ts - cached[0]) <= ttl:
+            return cached[1]
+
+    response = await _request_with_retry(
+        BINGX_TICKER_24H_URL,
+        {"symbol": pair, "timestamp": int(now_ts * 1000)},
+        label=f"bingx live ticker {symbol}",
+    )
+    payload: dict[str, Any] = response.json()
+    if int(payload.get("code", -1)) != 0:
+        raise BinanceCandlesError(f"bingx live ticker error: {payload}")
+    rows: list[dict[str, Any]] = payload.get("data") or []
+    if not rows:
+        raise BinanceCandlesError(f"bingx live ticker empty for {symbol}")
+
+    row = rows[0]
+    live_price = float(
+        row.get("lastPrice")
+        or row.get("last")
+        or row.get("close")
+        or row.get("lastClose")
+        or 0.0
+    )
+    if live_price <= 0:
+        raise BinanceCandlesError(f"bingx live ticker has invalid price for {symbol}: {row}")
+
+    if ttl > 0:
+        async with _LIVE_PRICE_CACHE_LOCK:
+            _LIVE_PRICE_CACHE[pair] = (now_ts, live_price)
+    return live_price
 
 
 async def build_snapshot(

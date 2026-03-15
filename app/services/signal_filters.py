@@ -26,6 +26,9 @@ class SignalFilterEngine:
         repeat_guard_min_rsi_delta: float = 2.0,
         redis_url: str = "",
         redis_prefix: str = "signal_filter",
+        memory_state_ttl_seconds: int = 7200,
+        memory_state_max_keys: int = 200000,
+        memory_gc_interval_seconds: int = 60,
     ) -> None:
         self.cooldown_seconds = max(0, cooldown_seconds)
         self.dedup_window_seconds = max(0, dedup_window_seconds)
@@ -33,11 +36,15 @@ class SignalFilterEngine:
         self.repeat_guard_min_move_pct = max(0.0, repeat_guard_min_move_pct)
         self.repeat_guard_min_rsi_delta = max(0.0, repeat_guard_min_rsi_delta)
         self.redis_prefix = redis_prefix.strip() or "signal_filter"
+        self.memory_state_ttl_seconds = max(300, int(memory_state_ttl_seconds))
+        self.memory_state_max_keys = max(1000, int(memory_state_max_keys))
+        self.memory_gc_interval_seconds = max(10, int(memory_gc_interval_seconds))
         self._redis: Redis | None = Redis.from_url(redis_url, decode_responses=True) if redis_url else None
         self._last_sent_at: dict[tuple[str, str, str, str], float] = {}
         self._last_fingerprint_at: dict[str, float] = {}
         self._last_sent_price: dict[tuple[str, str, str, str], float] = {}
         self._last_sent_rsi: dict[tuple[str, str, str, str], float] = {}
+        self._last_gc_ts = 0.0
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -65,6 +72,7 @@ class SignalFilterEngine:
         scope: str,
     ) -> tuple[bool, RejectReason | None]:
         now = time.time()
+        self._gc_in_memory_state(now)
         key = self._cooldown_key(candidate, scope)
         last_sent = self._last_sent_at.get(key, 0.0)
         last_price = self._last_sent_price.get(key, 0.0)
@@ -109,6 +117,30 @@ class SignalFilterEngine:
         self._last_sent_price[key] = candidate.current_price
         self._last_sent_rsi[key] = candidate.rsi_value
         return True, None
+
+    def _gc_in_memory_state(self, now: float) -> None:
+        if (now - self._last_gc_ts) < self.memory_gc_interval_seconds:
+            return
+        self._last_gc_ts = now
+        cutoff = now - self.memory_state_ttl_seconds
+
+        stale_cooldown_keys = [key for key, ts in self._last_sent_at.items() if ts < cutoff]
+        for key in stale_cooldown_keys:
+            self._last_sent_at.pop(key, None)
+            self._last_sent_price.pop(key, None)
+            self._last_sent_rsi.pop(key, None)
+
+        stale_fp_keys = [key for key, ts in self._last_fingerprint_at.items() if ts < cutoff]
+        for key in stale_fp_keys:
+            self._last_fingerprint_at.pop(key, None)
+
+        # Soft cap protection if process lives very long without Redis state.
+        if len(self._last_fingerprint_at) > self.memory_state_max_keys:
+            overflow = len(self._last_fingerprint_at) - int(self.memory_state_max_keys * 0.8)
+            if overflow > 0:
+                oldest = sorted(self._last_fingerprint_at.items(), key=lambda item: item[1])[:overflow]
+                for key, _ in oldest:
+                    self._last_fingerprint_at.pop(key, None)
 
     async def _accept_redis(
         self,

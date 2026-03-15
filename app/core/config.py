@@ -49,10 +49,18 @@ class Settings(BaseSettings):
     signal_repeat_guard_min_move_pct: float = 0.4
     signal_repeat_guard_min_rsi_delta: float = 2.0
     signal_filter_redis_prefix: str = "signal_filter"
+    signal_filter_memory_state_ttl_seconds: int = 7200
+    signal_filter_memory_state_max_keys: int = 200_000
+    signal_filter_memory_gc_interval_seconds: int = 60
     signal_retention_days: int = 3
     signal_retention_prune_interval_seconds: int = 1800
     signal_debug_full_enabled: bool = False
+    signal_debug_reject_sample_rate: float = 0.2
     signal_debug_log_limit_per_cycle: int = 500
+    signal_disable_double_min_move_filter: bool = True
+    signal_enable_futures_adapter: bool = False
+    signal_live_price_enabled: bool = True
+    signal_live_price_cache_ttl_seconds: float = 1.5
 
     log_level: str = "INFO"
 
