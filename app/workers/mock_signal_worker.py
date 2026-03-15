@@ -195,6 +195,12 @@ def _resolve_shard_index(shard_count: int) -> int:
     return (int(match.group(1)) - 1) % shard_count
 
 
+def _pct_change(prev_value: float, current_value: float) -> float:
+    if prev_value == 0:
+        return 0.0
+    return ((current_value - prev_value) / prev_value) * 100.0
+
+
 async def _debug_raw_candidate(
     client: httpx.AsyncClient,
     *,
@@ -416,6 +422,9 @@ async def _run_rsi_mode(
             effective.get("price_change_15m_trigger_pct", settings.signal_price_change_15m_trigger_pct)
         )
         side_mode = str(effective.get("signal_side_mode", "all"))
+        trigger_mode = str(settings.signal_trigger_mode).strip().lower() or "candle"
+        if trigger_mode not in {"candle", "live_spike", "both"}:
+            trigger_mode = "candle"
         market_types = _resolve_market_types(str(effective.get("market_type", "both")))
         if not settings.signal_enable_futures_adapter:
             has_futures = "futures" in market_types
@@ -461,7 +470,18 @@ async def _run_rsi_mode(
                         await asyncio.sleep(0.08)
 
                     if feed_mode_enabled:
+                        prefetched_live_price: float | None = None
+                        live_change_pct: float | None = None
                         try:
+                            if trigger_mode in {"live_spike", "both"}:
+                                prefetched_live_price = await fetch_live_price(
+                                    symbol=symbol,
+                                    cache_ttl_seconds=settings.signal_live_price_cache_ttl_seconds,
+                                )
+                                live_change_pct = _pct_change(
+                                    snapshot.live_window_open_price,
+                                    prefetched_live_price,
+                                )
                             rsi_value = compute_rsi(snapshot.closes, period=settings.rsi_period)
                             candidate = evaluate_rsi_signal(
                                 symbol=symbol,
@@ -480,9 +500,18 @@ async def _run_rsi_mode(
                                 closes=snapshot.closes,
                                 rsi_period=settings.rsi_period,
                                 generated_at=snapshot.generated_at,
+                                trigger_mode=trigger_mode,
+                                live_change_pct=live_change_pct,
+                                live_window_open_price=snapshot.live_window_open_price,
+                                live_spike_5m_trigger_pct=settings.signal_live_spike_5m_trigger_pct,
+                                live_spike_15m_trigger_pct=settings.signal_live_spike_15m_trigger_pct,
                             )
                         except ValueError:
                             candidate = None
+                            live_change_pct = None
+                        except BinanceCandlesError:
+                            candidate = None
+                            live_change_pct = None
 
                         if not candidate:
                             await _debug_raw_candidate(
@@ -497,6 +526,8 @@ async def _run_rsi_mode(
                                 payload={
                                     "price_change_5m": snapshot.price_change_5m,
                                     "price_change_15m": snapshot.price_change_15m,
+                                    "live_change_pct": live_change_pct,
+                                    "trigger_mode": trigger_mode,
                                 },
                             )
                         else:
@@ -560,8 +591,8 @@ async def _run_rsi_mode(
                                         payload={"details": reject.details if reject else "-"},
                                     )
                                 else:
-                                    live_price: float | None = None
-                                    if settings.signal_live_price_enabled:
+                                    live_price: float | None = prefetched_live_price
+                                    if settings.signal_live_price_enabled and live_price is None:
                                         try:
                                             live_price = await fetch_live_price(
                                                 symbol=candidate.symbol,
@@ -584,7 +615,10 @@ async def _run_rsi_mode(
                                         "prev_price": candidate.prev_price,
                                         "price": candidate.current_price,
                                         "volume": snapshot.quote_volume_24h,
-                                        "reason": f"RSI {candidate.rsi_value:.2f} ({candidate.timeframe})",
+                                        "reason": (
+                                            f"trigger={candidate.trigger_source} "
+                                            f"move={candidate.pct_change:+.2f}% ({candidate.timeframe})"
+                                        ),
                                         "last_price": live_price if live_price is not None else candidate.current_price,
                                         "quote_volume": snapshot.quote_volume_24h,
                                     }

@@ -6,6 +6,7 @@ from typing import Literal
 
 SignalType = Literal["pump", "dump"]
 DivergenceType = Literal["bullish", "bearish", "hidden_bullish", "hidden_bearish"]
+TriggerMode = Literal["candle", "live_spike", "both"]
 
 
 def compute_rsi(closes: list[float], *, period: int = 14) -> float:
@@ -207,17 +208,58 @@ def evaluate_rsi_signal(
     closes: list[float] | None = None,
     rsi_period: int = 14,
     generated_at: datetime,
+    trigger_mode: TriggerMode = "candle",
+    live_change_pct: float | None = None,
+    live_window_open_price: float | None = None,
+    live_spike_5m_trigger_pct: float | None = None,
+    live_spike_15m_trigger_pct: float | None = None,
 ) -> RsiSignalCandidate | None:
+    trigger_mode_norm = trigger_mode if trigger_mode in {"candle", "live_spike", "both"} else "candle"
     trigger_5m = abs(price_change_5m) >= price_change_5m_trigger_pct
     trigger_15m = abs(price_change_15m) >= price_change_15m_trigger_pct
-    if not (trigger_5m or trigger_15m):
-        return None
+    candle_triggered = trigger_5m or trigger_15m
 
-    dominant_change = (
+    candle_dominant_change = (
         price_change_15m
         if abs(price_change_15m) >= abs(price_change_5m)
         else price_change_5m
     )
+    live_threshold = (
+        live_spike_5m_trigger_pct
+        if timeframe == "5m"
+        else live_spike_15m_trigger_pct
+    )
+    live_triggered = (
+        live_change_pct is not None
+        and live_threshold is not None
+        and abs(live_change_pct) >= abs(live_threshold)
+    )
+
+    if trigger_mode_norm == "candle":
+        is_triggered = candle_triggered
+    elif trigger_mode_norm == "live_spike":
+        is_triggered = live_triggered
+    else:
+        is_triggered = candle_triggered or live_triggered
+    if not is_triggered:
+        return None
+
+    dominant_change = candle_dominant_change
+    trigger_source = "price_window"
+    baseline_price = window_open_price
+    if trigger_mode_norm == "live_spike":
+        dominant_change = float(live_change_pct or 0.0)
+        trigger_source = "live_spike"
+        baseline_price = live_window_open_price if live_window_open_price is not None else window_open_price
+    elif trigger_mode_norm == "both" and live_triggered and live_change_pct is not None:
+        if (not candle_triggered) or abs(live_change_pct) >= abs(candle_dominant_change):
+            dominant_change = float(live_change_pct)
+            trigger_source = "live_spike"
+            baseline_price = (
+                live_window_open_price if live_window_open_price is not None else window_open_price
+            )
+        else:
+            trigger_source = "price_window"
     if dominant_change == 0:
         return None
     signal_type: SignalType = "pump" if dominant_change > 0 else "dump"
@@ -236,7 +278,7 @@ def evaluate_rsi_signal(
         timeframe=timeframe,
         signal_type=signal_type,
         rsi_value=round(rsi_value, 2),
-        prev_price=window_open_price,
+        prev_price=baseline_price,
         current_price=current_price,
         pct_change=round(dominant_change, 4),
         price_change_5m=round(price_change_5m, 4),
@@ -245,7 +287,7 @@ def evaluate_rsi_signal(
         avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,
         exchange="BingX",
-        trigger_source="price_window",
+        trigger_source=trigger_source,
         context_tag=None,
         rsi_divergence_type=divergence_type,
         rsi_divergence_pct=divergence_pct,

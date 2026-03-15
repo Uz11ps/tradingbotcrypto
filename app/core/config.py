@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     signal_worker_replicas: int = 5
     worker_shard_index: int = 0
     worker_shard_count: int = 1
-    feed_universe_size: int = 300
+    feed_universe_size: int = 500
     feed_movers_limit: int = 20
     feed_min_change_pct: float = 2.5
     worker_feed_cooldown_seconds: int = 1800
@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     signal_volume_avg_window: int = 20
     signal_price_change_5m_trigger_pct: float = 1.5
     signal_price_change_15m_trigger_pct: float = 3.0
+    signal_trigger_mode: str = "candle"  # candle | live_spike | both
+    signal_live_spike_5m_trigger_pct: float = 2.5
+    signal_live_spike_15m_trigger_pct: float = 4.0
     signal_volume_multiplier_base: float = 1.35
     signal_volume_multiplier_strong: float = 1.2
     signal_strong_move_pct: float = 5.0

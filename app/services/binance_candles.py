@@ -52,6 +52,7 @@ class CandleSnapshot:
     avg_volume_20: float
     quote_volume_24h: float
     window_open_price: float
+    live_window_open_price: float
     closes: list[float]
     signal_candle_open_time_ms: int
     signal_candle_close_time_ms: int
@@ -292,6 +293,7 @@ async def build_snapshot(
         price_change_15m = _window_change(closes, 1)
         window_open_price = closes[-2]
     current_bar = closed_bars[-1]
+    live_window_open_price = bars[-1].open if bars else current_close
     interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
     return CandleSnapshot(
         symbol=symbol,
@@ -305,6 +307,7 @@ async def build_snapshot(
         avg_volume_20=avg_volume_20,
         quote_volume_24h=quote_volume_24h,
         window_open_price=window_open_price,
+        live_window_open_price=live_window_open_price,
         closes=closes,
         signal_candle_open_time_ms=current_bar.open_time_ms,
         signal_candle_close_time_ms=current_bar.open_time_ms + interval_ms,
