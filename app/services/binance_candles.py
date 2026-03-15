@@ -67,6 +67,8 @@ class KlineBar:
     low: float
     close: float
     volume: float
+    close_time_ms: int | None = None
+    is_closed: bool | None = None
 
 
 def _pct_change(prev_value: float, current_value: float) -> float:
@@ -79,6 +81,39 @@ def _window_change(closes: list[float], bars_back: int) -> float:
     if len(closes) <= bars_back:
         return 0.0
     return _pct_change(closes[-(bars_back + 1)], closes[-1])
+
+
+def _parse_is_closed(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _normalize_bar_order(bars: list[KlineBar], *, symbol: str, timeframe: str) -> list[KlineBar]:
+    if len(bars) < 2:
+        return bars
+    open_times = [bar.open_time_ms for bar in bars]
+    is_ascending = all(open_times[i] <= open_times[i + 1] for i in range(len(open_times) - 1))
+    is_descending = all(open_times[i] >= open_times[i + 1] for i in range(len(open_times) - 1))
+    if not (is_ascending or is_descending):
+        log.warning(
+            "BingX kline order is non-monotonic for %s %s; sorting by open_time_ms",
+            symbol,
+            timeframe,
+        )
+    if not is_ascending:
+        bars.sort(key=lambda bar: bar.open_time_ms)
+    return bars
 
 
 async def _request_with_retry(
@@ -143,6 +178,7 @@ async def fetch_recent_bars(
     interval = TIMEFRAME_MAP.get(timeframe)
     if not interval:
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
+    interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
 
     pair = _to_bingx_symbol(symbol)
     response = await _request_with_retry(
@@ -166,10 +202,19 @@ async def fetch_recent_bars(
                 low=float(row[3]),
                 close=float(row[4]),
                 volume=float(row[5]),
+                close_time_ms=int(row[6]) if len(row) > 6 else None,
+                is_closed=_parse_is_closed(row[7]) if len(row) > 7 else None,
             )
         )
     if len(bars) < 30:
         raise BinanceCandlesError(f"Not enough bars for {symbol} {timeframe}")
+    bars = _normalize_bar_order(bars, symbol=symbol, timeframe=timeframe)
+
+    # Normalize close_time when API does not provide it.
+    if interval_ms > 0:
+        for bar in bars:
+            if bar.close_time_ms is None:
+                bar.close_time_ms = bar.open_time_ms + interval_ms
     return bars
 
 
@@ -266,9 +311,23 @@ async def build_snapshot(
     quote_volume_24h: float | None = None,
 ) -> CandleSnapshot:
     bars = await fetch_recent_bars(symbol=symbol, timeframe=timeframe, limit=100)
-    # Most exchanges return the current forming bar as the last kline entry.
-    # To avoid "future-looking" signal prices, we lock snapshots to the last closed candle.
-    closed_bars = bars[:-1] if len(bars) >= 31 else bars
+    bars = _normalize_bar_order(bars, symbol=symbol, timeframe=timeframe)
+    interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
+    now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+    last_bar = bars[-1]
+    # Some exchanges include the currently forming bar, while others can return only closed bars.
+    # Prefer explicit is_closed flag if present; otherwise infer by close_time vs current time.
+    if last_bar.is_closed is not None:
+        is_last_forming = not last_bar.is_closed
+    elif last_bar.close_time_ms is not None and interval_ms > 0:
+        is_last_forming = now_ms < last_bar.close_time_ms
+    elif interval_ms > 0:
+        is_last_forming = now_ms < (last_bar.open_time_ms + interval_ms)
+    else:
+        is_last_forming = False
+
+    # Lock candle calculations to closed bars only.
+    closed_bars = bars[:-1] if is_last_forming and len(bars) >= 31 else bars
     closes = [bar.close for bar in closed_bars]
     volumes = [bar.volume for bar in closed_bars]
     if len(closes) < 30 or len(volumes) < 30:
@@ -293,8 +352,12 @@ async def build_snapshot(
         price_change_15m = _window_change(closes, 1)
         window_open_price = closes[-2]
     current_bar = closed_bars[-1]
-    live_window_open_price = bars[-1].open if bars else current_close
-    interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
+    if is_last_forming:
+        live_window_open_price = bars[-1].open
+    else:
+        # Fallback: if exchange returns only closed bars, use latest close baseline
+        # to avoid overstating intra-window move.
+        live_window_open_price = current_close
     return CandleSnapshot(
         symbol=symbol,
         timeframe=timeframe,
