@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 
 import httpx
@@ -20,6 +21,8 @@ from app.services.binance_candles import (
 )
 from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
 from app.services.feed_formatter import format_signal_card, format_strategy_signal_card
+from app.services.live_ingest import LiveShadowIngestor
+from app.services.market_state_cache import MarketStateCache
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.signal_filters import SignalFilterEngine
 from app.services.signal_presentation import matches_signal_side_mode
@@ -199,6 +202,10 @@ def _pct_change(prev_value: float, current_value: float) -> float:
     if prev_value == 0:
         return 0.0
     return ((current_value - prev_value) / prev_value) * 100.0
+
+
+def _parse_shadow_symbols(raw: str) -> list[str]:
+    return [item.strip() for item in (raw or "").split(",") if item.strip()]
 
 
 async def _debug_raw_candidate(
@@ -802,9 +809,43 @@ async def main() -> None:
     shard_index = _resolve_shard_index(shard_count)
     log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
     last_prune_ts = 0.0
+    loop_cycle = 0
+    shadow_cache: MarketStateCache | None = None
+    shadow_ingestor: LiveShadowIngestor | None = None
+    shadow_stop_event: asyncio.Event | None = None
+    shadow_task: asyncio.Task[None] | None = None
+    if settings.signal_shadow_mode_enabled and shard_index == 0:
+        symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
+        shadow_cache = MarketStateCache(
+            ttl_seconds=max(30, settings.worker_interval_seconds * 12),
+            max_points_per_symbol=1200,
+            max_symbols=max(100, len(symbols) * 4),
+        )
+        shadow_ingestor = LiveShadowIngestor(
+            cache=shadow_cache,
+            symbols=symbols,
+            ws_url=settings.signal_live_ws_url,
+            reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+        )
+        shadow_stop_event = asyncio.Event()
+        shadow_task = asyncio.create_task(
+            shadow_ingestor.run(stop_event=shadow_stop_event),
+            name="live-shadow-ingest",
+        )
+        log.info(
+            "Shadow live ingest started: ws_url=%s symbols=%d",
+            settings.signal_live_ws_url,
+            len(symbols),
+        )
+    elif settings.signal_shadow_mode_enabled:
+        log.info(
+            "Shadow live ingest is enabled but skipped on shard_index=%s (runs only on shard 0)",
+            shard_index,
+        )
 
     try:
         while True:
+            loop_cycle += 1
             if settings.signal_engine_mode == "rsi":
                 await _run_rsi_mode(client, bot, filters, shard_index, shard_count)
             else:
@@ -829,8 +870,35 @@ async def main() -> None:
                     except Exception:
                         log.exception("Signal retention prune failed")
 
+            if (
+                shadow_ingestor is not None
+                and shadow_cache is not None
+                and loop_cycle % max(1, settings.signal_live_shadow_log_interval_cycles) == 0
+            ):
+                stats = shadow_ingestor.stats
+                log.info(
+                    (
+                        "Shadow ingest stats: connected=%s reconnects=%d errors=%d "
+                        "messages=%d updates=%d symbols=%d points=%d last_event_ts_ms=%d"
+                    ),
+                    stats.connected,
+                    stats.reconnects,
+                    stats.errors_total,
+                    stats.messages_total,
+                    stats.updates_total,
+                    shadow_cache.symbols_count(),
+                    shadow_cache.points_count(),
+                    stats.last_event_ts_ms,
+                )
+
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:
+        if shadow_stop_event is not None:
+            shadow_stop_event.set()
+        if shadow_task is not None:
+            shadow_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await shadow_task
         await filters.aclose()
         await client.aclose()
         await bot.session.close()

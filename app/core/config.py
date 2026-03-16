@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     signal_enable_futures_adapter: bool = False
     signal_live_price_enabled: bool = True
     signal_live_price_cache_ttl_seconds: float = 1.5
+    signal_live_detector_enabled: bool = False
+    signal_shadow_mode_enabled: bool = True
+    signal_send_enabled: bool = True
+    signal_contract_version: str = "v2"
+    signal_live_ws_url: str = "wss://open-api-ws.bingx.com/market"
+    signal_live_shadow_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT"
+    signal_live_ws_reconnect_seconds: float = 3.0
+    signal_live_shadow_log_interval_cycles: int = 3
 
     log_level: str = "INFO"
 

@@ -1,6 +1,229 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-16 11:05:00] Планируемые правки: PR-пакет 1 (Live contract + feature flags, без смены runtime)
+**1) Список изменяемых файлов:**
+- `app/core/config.py`
+- `CUR`
+
+**Новые файлы:**
+- `app/services/signal_contract.py`
+- `tests/test_signal_contract.py`
+
+**2) Точная цель:**
+- Зафиксировать единый `LiveSignalContract` для будущего live-first pipeline.
+- Ввести флаги безопасного внедрения:
+  - `signal_live_detector_enabled`
+  - `signal_shadow_mode_enabled`
+  - `signal_send_enabled`
+  - `signal_contract_version`
+- Не менять текущий runtime-путь генерации/отправки сигналов.
+
+**3) Что не меняется:**
+- Логика `candle/live_spike/both` и текущий worker flow.
+- API роуты/схемы и SQL-модели.
+- Dedup/cooldown поведение.
+
+**4) Риски:**
+- Низкий риск: возможна только регрессия загрузки настроек, если ошибиться в типах/дефолтах.
+
+**5) Тесты:**
+- Новый unit-тест контракта (валидация обязательных полей и timestamp chain).
+- `pytest -q tests/test_signal_contract.py`
+- `pytest -q` (полный прогон)
+
+**6) Rollback-план:**
+- Удалить новые флаги и модуль контракта из этого PR.
+- Возврат к предыдущему состоянию без влияния на runtime (поведение системы не меняется).
+
+---
+## [2026-03-16 11:18:00] Реализовано: PR-пакет 1 (Live contract + feature flags, без смены runtime)
+**Что сделано:**
+- Добавлены feature flags в `app/core/config.py`:
+  - `signal_live_detector_enabled=False`
+  - `signal_shadow_mode_enabled=True`
+  - `signal_send_enabled=True`
+  - `signal_contract_version="v2"`
+- Добавлен новый модуль `app/services/signal_contract.py`:
+  - `SignalTimestamps` с валидацией timestamp chain;
+  - `LiveSignalContract` с обязательными полями:
+    - `baseline_price`
+    - `current_price`
+    - `change_pct`
+    - `trigger_source`
+    - `window_seconds`
+  - метод `to_payload()` для детерминированной сериализации.
+- Добавлены unit-тесты `tests/test_signal_contract.py`:
+  - позитивный кейс формирования payload;
+  - негативный кейс на невалидную timestamp chain.
+
+**Что не менялось:**
+- Текущий runtime pipeline и доставка сигналов.
+- БД/роуты/API-контракт.
+- Dedup/cooldown и candle/live режимы в текущем воркере.
+
+**Проверки:**
+- `pytest -q tests/test_signal_contract.py` -> `2 passed`.
+- `pytest -q` -> `18 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Удалить `app/services/signal_contract.py` и `tests/test_signal_contract.py`.
+- Убрать новые флаги из `app/core/config.py`.
+- Runtime поведение останется прежним (этап не подключал новый контракт в pipeline).
+
+---
+## [2026-03-16 11:27:00] Планируемые правки: PR-пакет 2 (In-memory live market cache, без подключения в worker)
+**1) Список изменяемых файлов:**
+- `CUR`
+
+**Новые файлы:**
+- `app/services/market_state_cache.py`
+- `tests/test_market_state_cache.py`
+
+**2) Точная цель:**
+- Добавить bounded in-memory cache для live market state:
+  - ограничение по памяти/точкам;
+  - TTL-cleanup;
+  - гибридный `current_price`: `mid=(bid+ask)/2`, fallback на `last_trade`.
+- Подготовить безопасный фундамент для последующего WS ingest.
+
+**3) Что не меняется:**
+- Текущий pipeline воркера и отправка сигналов.
+- API/БД/схемы.
+- Логика dedup/cooldown.
+
+**4) Риски:**
+- Некорректная очистка буфера (TTL/eviction) может давать рассинхрон cache state.
+
+**5) Тесты:**
+- Unit-тесты:
+  - выбор `mid` vs `last_trade`;
+  - TTL cleanup;
+  - bounded eviction по лимиту точек.
+- `pytest -q tests/test_market_state_cache.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Удалить новый модуль cache и его тесты.
+- Этап не подключается в runtime, откат без влияния на production flow.
+
+---
+## [2026-03-16 11:34:00] Реализовано: PR-пакет 2 (In-memory live market cache, без подключения в worker)
+**Что сделано:**
+- Добавлен `app/services/market_state_cache.py`:
+  - `MarketPricePoint` (last/bid/ask, `mid_price`, `current_price`, `price_source`);
+  - `MarketStateCache` с ограничениями:
+    - `ttl_seconds`
+    - `max_points_per_symbol`
+    - `max_symbols`
+  - методы:
+    - `upsert(...)`
+    - `get_latest(...)`
+    - `get_baseline_price(...)` (first-in-window)
+    - `cleanup(...)`
+  - политика цены: `live_mid` при наличии BBO, иначе `live_trade`.
+- Добавлены unit-тесты `tests/test_market_state_cache.py`:
+  - приоритет `mid` над `last_trade`;
+  - fallback на `last_trade`;
+  - TTL cleanup;
+  - eviction по лимиту символов.
+
+**Что не менялось:**
+- Worker runtime flow и API/БД.
+- Текущая отправка сигналов и dedup/cooldown pipeline.
+
+**Проверки:**
+- `pytest -q tests/test_market_state_cache.py` -> `4 passed`.
+- `pytest -q` -> `22 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Rollback-план:**
+- Удалить `app/services/market_state_cache.py` и `tests/test_market_state_cache.py`.
+- Runtime поведение не затронуто, откат безопасный.
+
+---
+## [2026-03-16 11:48:00] Планируемые правки: PR-пакет 3 (Shadow WS ingest внутри worker)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/workers/mock_signal_worker.py`
+- `pyproject.toml`
+
+**Новые файлы:**
+- `app/services/live_ingest.py`
+- `tests/test_live_ingest.py`
+
+**2) Точная цель:**
+- Добавить shadow WS ingestion task внутри текущего worker (без switch signal path).
+- Наполнять `MarketStateCache` live-данными (`trade + best bid/ask`, hybrid fallback).
+- Логировать health/stat counters:
+  - reconnects
+  - messages
+  - updates
+  - cache symbols/points
+
+**3) Что не меняется:**
+- Старый production signal pipeline (candle/live_spike/both) остаётся основным.
+- Отправка сигналов и API/БД контракт не переключаются на новый live detector.
+
+**4) Риски:**
+- Нестабильность WS соединения (reconnect storm).
+- Шум в логах при неверном формате payload.
+- Потенциальный рост CPU/RAM (контролируется bounded cache и shadow-only режимом).
+
+**5) Тесты:**
+- Unit-тесты парсинга payload и обновления cache.
+- `pytest -q tests/test_live_ingest.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Немедленно отключить shadow ingest через флаг.
+- При необходимости удалить модуль `live_ingest` и интеграцию в worker.
+- Старый production path останется неизменным.
+
+---
+## [2026-03-16 12:02:00] Реализовано: PR-пакет 3 (Shadow WS ingest внутри worker)
+**Что сделано:**
+- Добавлена зависимость `httpx-ws` в `pyproject.toml`.
+- Добавлен модуль `app/services/live_ingest.py`:
+  - `LiveShadowIngestor` (WS connect/reconnect loop);
+  - subscribe на `trade + depth5` каналы;
+  - декодирование `TextMessage/BytesMessage` (включая gzip payload);
+  - auto pong для ping-сообщений;
+  - обновление `MarketStateCache` с hybrid fallback (`live_mid` -> `live_trade`);
+  - runtime counters: `connected/reconnects/messages/updates/errors`.
+- Обновлен `app/services/market_state_cache.py`:
+  - добавлены `symbols_count()` и `points_count()` для health мониторинга.
+- Интеграция в `app/workers/mock_signal_worker.py`:
+  - shadow ingest стартует как background task внутри worker;
+  - запуск только при `signal_shadow_mode_enabled` и только на shard `0`;
+  - периодический health-log ingest/cache статистики;
+  - аккуратная остановка task в `finally`.
+- Расширен `app/core/config.py`:
+  - `signal_live_ws_url`
+  - `signal_live_shadow_symbols`
+  - `signal_live_ws_reconnect_seconds`
+  - `signal_live_shadow_log_interval_cycles`
+- Добавлены тесты `tests/test_live_ingest.py`:
+  - text/gzip decode;
+  - payload apply в cache;
+  - ping/pong extraction.
+
+**Что не менялось:**
+- Старый production signal path (детекция/отправка) не переключался на новый live detector.
+- API/БД контракт сигналов без hard-cut.
+
+**Проверки:**
+- `pytest -q tests/test_live_ingest.py` -> `4 passed`.
+- `pytest -q` -> `26 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Отключить `signal_shadow_mode_enabled=false`.
+- При необходимости удалить `live_ingest` integration из worker и новый модуль.
+- Прод-путь сигналов останется рабочим и прежним.
+
+---
 ## [2026-03-12 19:20:00] Реализовано: closed-candle price + упрощённый UI + постоянный нижний inline-блок
 **Что сделано:**
 - Исправлен источник цены в snapshot:
