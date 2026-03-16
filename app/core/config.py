@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     signal_live_shadow_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT"
     signal_live_ws_reconnect_seconds: float = 3.0
     signal_live_shadow_log_interval_cycles: int = 3
+    signal_live_ingest_owner_lock_ttl_seconds: int = 90
 
     log_level: str = "INFO"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 
 import httpx
 from aiogram import Bot
+from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -187,13 +189,23 @@ def _resolve_market_types(mode: str) -> list[str]:
     return ["spot", "futures"]
 
 
+def _derive_shard_index_from_identity(identity: str, shard_count: int) -> int:
+    if shard_count <= 1:
+        return 0
+    normalized = (identity or "").strip().lower()
+    if not normalized:
+        return 0
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % shard_count
+
+
 def _resolve_shard_index(shard_count: int) -> int:
     if settings.worker_shard_index >= 0:
         return settings.worker_shard_index % shard_count
     hostname = os.getenv("HOSTNAME", "")
     match = re.search(r"-(\d+)$", hostname)
     if not match:
-        return 0
+        return _derive_shard_index_from_identity(hostname, shard_count)
     # Docker compose replica names end with 1..N
     return (int(match.group(1)) - 1) % shard_count
 
@@ -206,6 +218,39 @@ def _pct_change(prev_value: float, current_value: float) -> float:
 
 def _parse_shadow_symbols(raw: str) -> list[str]:
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
+@dataclass(slots=True)
+class _LeaseState:
+    is_owner: bool = False
+    acquired_once: bool = False
+    lost_once: bool = False
+
+
+class _RedisLeaseGuard:
+    def __init__(self, *, redis: Redis, key: str, owner: str, ttl_seconds: int) -> None:
+        self._redis = redis
+        self._key = key
+        self._owner = owner
+        self._ttl = max(10, int(ttl_seconds))
+
+    async def try_acquire_or_renew(self) -> bool:
+        acquired = await self._redis.set(self._key, self._owner, ex=self._ttl, nx=True)
+        if acquired:
+            return True
+        current_owner = await self._redis.get(self._key)
+        if current_owner == self._owner:
+            await self._redis.expire(self._key, self._ttl)
+            return True
+        return False
+
+    async def release_if_owner(self) -> None:
+        try:
+            current_owner = await self._redis.get(self._key)
+            if current_owner == self._owner:
+                await self._redis.delete(self._key)
+        except Exception:
+            log.exception("Failed to release redis lease key=%s", self._key)
 
 
 async def _debug_raw_candidate(
@@ -412,6 +457,19 @@ async def _run_rsi_mode(
         return
     volume_map = universe.volume_map
     log.info("RSI shard %d: %d symbols to scan", shard_index, len(shard_symbols))
+    log.info(
+        (
+            "runtime_state worker_shard_index=%s worker_shard_total=%s "
+            "assigned_symbols_count=%s shadow_ingest_owner=%s "
+            "ingest_owner_acquired=%s ingest_owner_lost=%s"
+        ),
+        shard_index,
+        shard_count,
+        len(shard_symbols),
+        False,
+        False,
+        False,
+    )
 
     for chat_id in chat_ids:
         try:
@@ -810,11 +868,32 @@ async def main() -> None:
     log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
     last_prune_ts = 0.0
     loop_cycle = 0
+    worker_identity = os.getenv("HOSTNAME", "unknown-worker")
+    redis_lease_client: Redis | None = None
+    ingest_lease: _RedisLeaseGuard | None = None
+    ingest_lease_state = _LeaseState()
     shadow_cache: MarketStateCache | None = None
     shadow_ingestor: LiveShadowIngestor | None = None
     shadow_stop_event: asyncio.Event | None = None
     shadow_task: asyncio.Task[None] | None = None
-    if settings.signal_shadow_mode_enabled and shard_index == 0:
+    shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
+    if settings.signal_shadow_mode_enabled and settings.redis_url:
+        try:
+            redis_lease_client = Redis.from_url(settings.redis_url, decode_responses=True)
+            ingest_lease = _RedisLeaseGuard(
+                redis=redis_lease_client,
+                key="signal:shadow_ingest_owner",
+                owner=worker_identity,
+                ttl_seconds=settings.signal_live_ingest_owner_lock_ttl_seconds,
+            )
+        except Exception:
+            log.exception("Failed to initialize ingest owner redis lease")
+            ingest_lease = None
+            redis_lease_client = None
+    shadow_should_run = settings.signal_shadow_mode_enabled and (
+        ingest_lease is None and shard_index == 0
+    )
+    if shadow_should_run:
         symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
         shadow_cache = MarketStateCache(
             ttl_seconds=max(30, settings.worker_interval_seconds * 12),
@@ -837,15 +916,68 @@ async def main() -> None:
             settings.signal_live_ws_url,
             len(symbols),
         )
-    elif settings.signal_shadow_mode_enabled:
+    elif settings.signal_shadow_mode_enabled and ingest_lease is None:
         log.info(
             "Shadow live ingest is enabled but skipped on shard_index=%s (runs only on shard 0)",
             shard_index,
         )
+    log.info(
+        (
+            "runtime_state worker_shard_index=%s worker_shard_total=%s "
+            "assigned_symbols_count=%s shadow_ingest_owner=%s "
+            "ingest_owner_acquired=%s ingest_owner_lost=%s"
+        ),
+        shard_index,
+        shard_count,
+        -1,
+        shadow_should_run,
+        ingest_lease_state.acquired_once,
+        ingest_lease_state.lost_once,
+    )
 
     try:
         while True:
             loop_cycle += 1
+            if settings.signal_shadow_mode_enabled and ingest_lease is not None:
+                is_owner_now = await ingest_lease.try_acquire_or_renew()
+                if is_owner_now and not ingest_lease_state.acquired_once:
+                    ingest_lease_state.acquired_once = True
+                if is_owner_now and shadow_task is None:
+                    shadow_cache = MarketStateCache(
+                        ttl_seconds=max(30, settings.worker_interval_seconds * 12),
+                        max_points_per_symbol=1200,
+                        max_symbols=max(100, len(shadow_symbols) * 4),
+                    )
+                    shadow_ingestor = LiveShadowIngestor(
+                        cache=shadow_cache,
+                        symbols=shadow_symbols,
+                        ws_url=settings.signal_live_ws_url,
+                        reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+                    )
+                    shadow_stop_event = asyncio.Event()
+                    shadow_task = asyncio.create_task(
+                        shadow_ingestor.run(stop_event=shadow_stop_event),
+                        name="live-shadow-ingest",
+                    )
+                    ingest_lease_state.is_owner = True
+                    log.info(
+                        "Shadow live ingest started by lease owner: ws_url=%s symbols=%d",
+                        settings.signal_live_ws_url,
+                        len(shadow_symbols),
+                    )
+                elif (not is_owner_now) and shadow_task is not None:
+                    ingest_lease_state.is_owner = False
+                    ingest_lease_state.lost_once = True
+                    if shadow_stop_event is not None:
+                        shadow_stop_event.set()
+                    shadow_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await shadow_task
+                    shadow_task = None
+                    shadow_ingestor = None
+                    shadow_stop_event = None
+                    shadow_cache = None
+                    log.warning("Shadow ingest ownership lost: stopping local ingest task")
             if settings.signal_engine_mode == "rsi":
                 await _run_rsi_mode(client, bot, filters, shard_index, shard_count)
             else:
@@ -890,6 +1022,20 @@ async def main() -> None:
                     shadow_cache.points_count(),
                     stats.last_event_ts_ms,
                 )
+            if loop_cycle % max(1, settings.signal_live_shadow_log_interval_cycles) == 0:
+                log.info(
+                    (
+                        "runtime_state worker_shard_index=%s worker_shard_total=%s "
+                        "assigned_symbols_count=%s shadow_ingest_owner=%s "
+                        "ingest_owner_acquired=%s ingest_owner_lost=%s"
+                    ),
+                    shard_index,
+                    shard_count,
+                    -1,
+                    ingest_lease_state.is_owner or (ingest_lease is None and shard_index == 0),
+                    ingest_lease_state.acquired_once or (ingest_lease is None and shard_index == 0),
+                    ingest_lease_state.lost_once,
+                )
 
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:
@@ -899,6 +1045,10 @@ async def main() -> None:
             shadow_task.cancel()
             with suppress(asyncio.CancelledError):
                 await shadow_task
+        if ingest_lease is not None:
+            await ingest_lease.release_if_owner()
+        if redis_lease_client is not None:
+            await redis_lease_client.aclose()
         await filters.aclose()
         await client.aclose()
         await bot.session.close()

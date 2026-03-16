@@ -1,6 +1,131 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-16 20:05:00] Планируемые правки: PR-пакет 4a (Shard fix + single-owner guard + runtime логирование)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/workers/mock_signal_worker.py`
+- `app/core/config.py`
+- `tests/test_worker_sharding.py`
+
+**2) Точная цель:**
+- Исправить auto-shard распределение, чтобы воркеры не падали в `index=0` при одинаковом fallback.
+- Добавить single-owner guard для shadow ingest (один владелец через Redis lease).
+- Добавить runtime-логи для быстрой проверки:
+  - `worker_shard_index`
+  - `worker_shard_total`
+  - `assigned_symbols_count`
+  - `shadow_ingest_owner`
+  - `ingest_owner_acquired`
+  - `ingest_owner_lost`
+
+**3) Что не меняется:**
+- Основной прод-путь генерации/отправки сигналов.
+- Reconnect/backoff/jitter механика WS (это отдельный PR4b).
+- Telemetry schema/API/DB контракты.
+
+**4) Риски:**
+- Ошибка в owner-lease может выключить shadow ingest.
+- Некорректный shard fallback может дать частичные пересечения по символам.
+
+**5) Тесты:**
+- `tests/test_worker_sharding.py` на стабильный auto-shard fallback.
+- `pytest -q tests/test_worker_sharding.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Отключить shadow ingest (`SIGNAL_SHADOW_MODE_ENABLED=false`).
+- Вернуть предыдущий worker commit.
+- Проверить восстановление baseline-поведения без owner-guard.
+
+---
+## [2026-03-16 20:17:00] Реализовано: PR-пакет 4a (Shard fix + single-owner guard + runtime логирование)
+**Что сделано:**
+- `app/workers/mock_signal_worker.py`:
+  - добавлен стабильный fallback для auto-shard:
+    - если `HOSTNAME` без суффикса `-N`, индекс считается по детерминированному hash identity;
+  - добавлен Redis lease guard для single-owner shadow ingest:
+    - lease key: `signal:shadow_ingest_owner`;
+    - acquire/renew/release;
+    - при потере lease shadow task останавливается;
+  - добавлены runtime-логи с ключами:
+    - `worker_shard_index`
+    - `worker_shard_total`
+    - `assigned_symbols_count`
+    - `shadow_ingest_owner`
+    - `ingest_owner_acquired`
+    - `ingest_owner_lost`
+- `app/core/config.py`:
+  - добавлен параметр `signal_live_ingest_owner_lock_ttl_seconds`.
+- `tests/test_worker_sharding.py`:
+  - добавлены тесты стабильного shard hash fallback и разрешения shard index при hostname без `-N`.
+
+**Что не менялось:**
+- Механика reconnect/backoff/jitter (перенесено в PR4b).
+- Telemetry schema/API/DB контракты.
+- Основной прод-путь сигналов.
+
+**Проверки:**
+- `pytest -q tests/test_worker_sharding.py` -> `3 passed`.
+- `pytest -q` -> `28 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Выключить shadow ingest флагом.
+- Вернуть предыдущий commit worker/config.
+- Проверить, что baseline path продолжает работать как до PR4a.
+
+---
+## [2026-03-16 19:45:00] Runtime-check после PR-пакета 3 + команды деплоя/диагностики
+**Короткий итог состояния системы:**
+- Внесен фундамент live-first миграции без переключения основного prod-пути:
+  - `LiveSignalContract` + timestamp chain;
+  - bounded `MarketStateCache` (TTL, caps, eviction);
+  - shadow WS ingest (`trade + depth`) в worker.
+- Подтверждено на проде:
+  - shadow ingest стартует и держит соединение (`connected=True`);
+  - cache наполняется (`symbols=3`, `points~1400+`, `updates` растут);
+  - ресурсы стабильны (worker ~3-6% CPU, ~31% RAM лимита);
+  - критичных ошибок старого signal path не выявлено.
+- Обнаруженный нюанс:
+  - shadow ingest стартует во всех 5 воркерах (из-за shard autodetect -> `index=0` у всех).
+  - Это не ломает прод-путь, но создает лишнюю нагрузку; требуется отдельный микро-фикс.
+
+**Системные команды (факт выполнения):**
+- Сервер:
+  - `cd /opt/tradingbotcrypto`
+  - `git status -sb`
+  - `git pull --ff-only origin main`
+  - `ls app/services/live_ingest.py`
+  - `docker compose --profile worker up -d --build --remove-orphans --scale signal_worker=5`
+  - `docker compose logs --tail=200 signal_worker | grep -E "Shadow live ingest started|Shadow ingest stats|live-shadow-ingest"`
+  - `docker compose logs --tail=400 signal_worker | grep -i shadow`
+  - `docker compose logs --tail=400 signal_worker | grep "RSI worker shard setup"`
+  - `grep -E "^WORKER_SHARD_INDEX=|^WORKER_SHARD_COUNT=" .env`
+  - `docker compose logs --tail=600 signal_worker | grep -A 25 "Live shadow ingest loop error"`
+  - `docker logs --tail=500 tradingbotcrypto-signal_worker-1 2>&1 | grep -A 80 "Live shadow ingest loop error"`
+  - `docker compose logs --since=10m signal_worker | grep "Shadow ingest stats"`
+  - `docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"`
+  - `docker compose logs --since=10m signal_worker | grep -E "Failed to save/send RSI feed alert|Signal retention prune failed|RSI reject: bad_data" | tail -n 50`
+- Локально (подготовка/публикация изменений):
+  - `git status --short`
+  - `git diff -- .`
+  - `git log -5 --oneline`
+  - `git add CUR pyproject.toml app/core/config.py app/workers/mock_signal_worker.py app/services/signal_contract.py app/services/market_state_cache.py app/services/live_ingest.py tests/test_signal_contract.py tests/test_market_state_cache.py tests/test_live_ingest.py`
+  - `git commit -m "Add shadow live-ingest foundation with bounded market cache."`
+  - `git push origin main`
+
+**Оперативные команды контроля live по всем воркерам:**
+- Проверка live ingest heartbeat:
+  - `docker compose logs --since=10m signal_worker | grep "Shadow ingest stats"`
+- Проверка shard распределения:
+  - `docker compose logs --since=10m signal_worker | grep "RSI worker shard setup"`
+- Проверка ошибок ingest:
+  - `docker compose logs --since=10m signal_worker | grep -A 40 "Live shadow ingest loop error"`
+- Проверка нагрузки:
+  - `docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"`
+
+---
 ## [2026-03-16 11:05:00] Планируемые правки: PR-пакет 1 (Live contract + feature flags, без смены runtime)
 **1) Список изменяемых файлов:**
 - `app/core/config.py`
