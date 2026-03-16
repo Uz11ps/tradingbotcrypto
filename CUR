@@ -1,6 +1,73 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-16 20:32:00] Планируемые правки: PR-пакет 4a-hotfix (shard uniqueness + runtime_state truth)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/workers/mock_signal_worker.py`
+- `app/core/config.py`
+- `tests/test_worker_sharding.py`
+
+**2) Точная цель:**
+- Убрать коллизии `worker_shard_index` между воркерами (детерминированный уникальный shard slot через Redis lock).
+- Сделать `runtime_state` правдивым:
+  - `shadow_ingest_owner` отражает реального владельца;
+  - `ingest_owner_acquired` выставляется после фактического acquire;
+  - `ingest_owner_lost` выставляется после фактической потери lease;
+  - `assigned_symbols_count` отражает реальный размер shard assignment, а не placeholder.
+
+**3) Что не меняется:**
+- Reconnect/backoff/jitter (PR4b).
+- Telemetry schema/API/DB.
+- Основная логика отправки сигналов.
+
+**4) Риски:**
+- Ошибка в shard slot lease может привести к временному перекосу распределения.
+- Изменение shard index на лету (при lease-loss) может краткосрочно изменить набор символов у воркера.
+
+**5) Тесты:**
+- `pytest -q tests/test_worker_sharding.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Вернуть предыдущий PR4a commit.
+- Временно задать фиксированный `WORKER_SHARD_INDEX` для одиночного worker режима (если нужен аварийный обход).
+
+---
+## [2026-03-16 20:41:00] Реализовано: PR-пакет 4a-hotfix (shard uniqueness + runtime_state truth)
+**Что сделано:**
+- `app/workers/mock_signal_worker.py`:
+  - добавлен Redis shard slot guard (`signal:worker_shard_slot:<idx>`) для уникального назначения shard index;
+  - shard slot обновляется/продлевается в runtime loop;
+  - release shard slot при graceful shutdown;
+  - `runtime_state` теперь логирует правдивые значения:
+    - `worker_shard_index`
+    - `worker_shard_total`
+    - `assigned_symbols_count` (из фактического shard assignment)
+    - `shadow_ingest_owner`
+    - `ingest_owner_acquired`
+    - `ingest_owner_lost`
+  - `ingest_owner_acquired` и `shadow_ingest_owner` синхронизированы с реальным состоянием owner lease.
+- `app/core/config.py`:
+  - добавлен `worker_shard_slot_lock_ttl_seconds` для управления TTL shard slot lease.
+- `tests/test_worker_sharding.py`:
+  - сохранены и подтверждены тесты sharding fallback.
+
+**Что не менялось:**
+- Reconnect/backoff/jitter (оставлено на PR4b).
+- Telemetry schema/API/DB.
+- Основной прод-путь отправки сигналов.
+
+**Проверки:**
+- `pytest -q tests/test_worker_sharding.py` -> `3 passed`.
+- `pytest -q` -> `28 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Откат на предыдущий commit PR4a.
+- При необходимости временный single-worker режим для аварийной стабилизации.
+
+---
 ## [2026-03-16 20:05:00] Планируемые правки: PR-пакет 4a (Shard fix + single-owner guard + runtime логирование)
 **1) Список изменяемых файлов:**
 - `CUR`

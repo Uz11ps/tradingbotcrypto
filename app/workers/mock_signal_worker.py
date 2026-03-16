@@ -253,6 +253,47 @@ class _RedisLeaseGuard:
             log.exception("Failed to release redis lease key=%s", self._key)
 
 
+class _RedisShardSlotGuard:
+    def __init__(self, *, redis: Redis, prefix: str, owner: str, shard_count: int, ttl_seconds: int) -> None:
+        self._redis = redis
+        self._prefix = prefix
+        self._owner = owner
+        self._shard_count = max(1, int(shard_count))
+        self._ttl = max(30, int(ttl_seconds))
+        self._slot: int | None = None
+
+    @property
+    def slot(self) -> int | None:
+        return self._slot
+
+    async def acquire_or_renew(self) -> int | None:
+        if self._slot is not None:
+            key = f"{self._prefix}:{self._slot}"
+            owner = await self._redis.get(key)
+            if owner == self._owner:
+                await self._redis.expire(key, self._ttl)
+                return self._slot
+            self._slot = None
+        for slot in range(self._shard_count):
+            key = f"{self._prefix}:{slot}"
+            acquired = await self._redis.set(key, self._owner, ex=self._ttl, nx=True)
+            if acquired:
+                self._slot = slot
+                return slot
+        return None
+
+    async def release_if_owner(self) -> None:
+        if self._slot is None:
+            return
+        key = f"{self._prefix}:{self._slot}"
+        try:
+            owner = await self._redis.get(key)
+            if owner == self._owner:
+                await self._redis.delete(key)
+        except Exception:
+            log.exception("Failed to release shard slot key=%s", key)
+
+
 async def _debug_raw_candidate(
     client: httpx.AsyncClient,
     *,
@@ -421,7 +462,7 @@ async def _run_rsi_mode(
     filters: SignalFilterEngine,
     shard_index: int,
     shard_count: int,
-) -> None:
+) -> int:
     try:
         universe = await fetch_top_symbols_by_volume(
             quote_asset=settings.bingx_quote_asset,
@@ -430,7 +471,7 @@ async def _run_rsi_mode(
         )
     except (BinanceUniverseError, Exception):
         log.exception("Failed to load universe in RSI mode")
-        return
+        return 0
 
     try:
         chat_ids = await _list_signal_chats(client)
@@ -441,11 +482,11 @@ async def _run_rsi_mode(
         chat_ids = [settings.telegram_signals_chat_id]
     if not chat_ids:
         log.info("RSI mode: no target chats registered yet")
-        return
+        return 0
 
     if not universe.symbols:
         log.warning("RSI mode: empty symbols list")
-        return
+        return 0
 
     shard_symbols = _select_shard_symbols(
         universe.symbols,
@@ -454,22 +495,9 @@ async def _run_rsi_mode(
     )
     if not shard_symbols:
         log.info("RSI mode: shard has no symbols (index=%s count=%s)", shard_index, shard_count)
-        return
+        return 0
     volume_map = universe.volume_map
     log.info("RSI shard %d: %d symbols to scan", shard_index, len(shard_symbols))
-    log.info(
-        (
-            "runtime_state worker_shard_index=%s worker_shard_total=%s "
-            "assigned_symbols_count=%s shadow_ingest_owner=%s "
-            "ingest_owner_acquired=%s ingest_owner_lost=%s"
-        ),
-        shard_index,
-        shard_count,
-        len(shard_symbols),
-        False,
-        False,
-        False,
-    )
 
     for chat_id in chat_ids:
         try:
@@ -838,7 +866,7 @@ async def _run_rsi_mode(
                                 chat_id,
                             )
 
-    return
+    return len(shard_symbols)
 
 
 async def main() -> None:
@@ -865,11 +893,12 @@ async def main() -> None:
     )
     shard_count = max(1, settings.worker_shard_count)
     shard_index = _resolve_shard_index(shard_count)
-    log.info("RSI worker shard setup: index=%s count=%s", shard_index, shard_count)
     last_prune_ts = 0.0
     loop_cycle = 0
     worker_identity = os.getenv("HOSTNAME", "unknown-worker")
+    assigned_symbols_count_last = -1
     redis_lease_client: Redis | None = None
+    shard_slot_guard: _RedisShardSlotGuard | None = None
     ingest_lease: _RedisLeaseGuard | None = None
     ingest_lease_state = _LeaseState()
     shadow_cache: MarketStateCache | None = None
@@ -877,9 +906,49 @@ async def main() -> None:
     shadow_stop_event: asyncio.Event | None = None
     shadow_task: asyncio.Task[None] | None = None
     shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
-    if settings.signal_shadow_mode_enabled and settings.redis_url:
+    if settings.worker_shard_index < 0 and settings.redis_url:
         try:
             redis_lease_client = Redis.from_url(settings.redis_url, decode_responses=True)
+            shard_slot_guard = _RedisShardSlotGuard(
+                redis=redis_lease_client,
+                prefix="signal:worker_shard_slot",
+                owner=worker_identity,
+                shard_count=shard_count,
+                ttl_seconds=settings.worker_shard_slot_lock_ttl_seconds,
+            )
+            claimed_slot = await shard_slot_guard.acquire_or_renew()
+            if claimed_slot is not None:
+                shard_index = claimed_slot
+            log.info(
+                "RSI worker shard setup: index=%s count=%s identity=%s",
+                shard_index,
+                shard_count,
+                worker_identity,
+            )
+        except Exception:
+            log.exception("Failed to initialize shard slot guard")
+            shard_slot_guard = None
+            if redis_lease_client is not None:
+                await redis_lease_client.aclose()
+            redis_lease_client = None
+            log.info(
+                "RSI worker shard setup: index=%s count=%s identity=%s",
+                shard_index,
+                shard_count,
+                worker_identity,
+            )
+    else:
+        log.info(
+            "RSI worker shard setup: index=%s count=%s identity=%s",
+            shard_index,
+            shard_count,
+            worker_identity,
+        )
+
+    if settings.signal_shadow_mode_enabled and settings.redis_url:
+        try:
+            if redis_lease_client is None:
+                redis_lease_client = Redis.from_url(settings.redis_url, decode_responses=True)
             ingest_lease = _RedisLeaseGuard(
                 redis=redis_lease_client,
                 key="signal:shadow_ingest_owner",
@@ -921,6 +990,8 @@ async def main() -> None:
             "Shadow live ingest is enabled but skipped on shard_index=%s (runs only on shard 0)",
             shard_index,
         )
+    ingest_lease_state.acquired_once = shadow_should_run
+    ingest_lease_state.is_owner = shadow_should_run
     log.info(
         (
             "runtime_state worker_shard_index=%s worker_shard_total=%s "
@@ -929,8 +1000,8 @@ async def main() -> None:
         ),
         shard_index,
         shard_count,
-        -1,
-        shadow_should_run,
+        assigned_symbols_count_last,
+        ingest_lease_state.is_owner,
         ingest_lease_state.acquired_once,
         ingest_lease_state.lost_once,
     )
@@ -938,6 +1009,10 @@ async def main() -> None:
     try:
         while True:
             loop_cycle += 1
+            if shard_slot_guard is not None:
+                refreshed_slot = await shard_slot_guard.acquire_or_renew()
+                if refreshed_slot is not None:
+                    shard_index = refreshed_slot
             if settings.signal_shadow_mode_enabled and ingest_lease is not None:
                 is_owner_now = await ingest_lease.try_acquire_or_renew()
                 if is_owner_now and not ingest_lease_state.acquired_once:
@@ -979,9 +1054,16 @@ async def main() -> None:
                     shadow_cache = None
                     log.warning("Shadow ingest ownership lost: stopping local ingest task")
             if settings.signal_engine_mode == "rsi":
-                await _run_rsi_mode(client, bot, filters, shard_index, shard_count)
+                assigned_symbols_count_last = await _run_rsi_mode(
+                    client,
+                    bot,
+                    filters,
+                    shard_index,
+                    shard_count,
+                )
             else:
                 await _run_legacy_mode(client, bot)
+                assigned_symbols_count_last = -1
 
             await _tune_ai(client)
             # Only shard 0 runs retention cleanup to avoid duplicate work
@@ -1031,9 +1113,9 @@ async def main() -> None:
                     ),
                     shard_index,
                     shard_count,
-                    -1,
-                    ingest_lease_state.is_owner or (ingest_lease is None and shard_index == 0),
-                    ingest_lease_state.acquired_once or (ingest_lease is None and shard_index == 0),
+                    assigned_symbols_count_last,
+                    ingest_lease_state.is_owner,
+                    ingest_lease_state.acquired_once,
                     ingest_lease_state.lost_once,
                 )
 
@@ -1047,6 +1129,8 @@ async def main() -> None:
                 await shadow_task
         if ingest_lease is not None:
             await ingest_lease.release_if_owner()
+        if shard_slot_guard is not None:
+            await shard_slot_guard.release_if_owner()
         if redis_lease_client is not None:
             await redis_lease_client.aclose()
         await filters.aclose()
