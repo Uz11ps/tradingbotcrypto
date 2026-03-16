@@ -1,6 +1,80 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-16 20:55:00] Планируемые правки: PR-пакет 4b (reconnect/backoff/jitter + counters/health)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/services/live_ingest.py`
+- `app/core/config.py`
+- `app/workers/mock_signal_worker.py`
+- `tests/test_live_ingest.py`
+
+**2) Точная цель:**
+- Добавить контролируемый reconnect c exponential backoff + jitter для shadow ingest.
+- Расширить counters/health для быстрого runtime-аудита:
+  - attempts/disconnects/timeouts/errors
+  - decode_failures/pongs_sent/subscriptions_sent
+  - cache_age_ms
+- Оставить detector path без изменений.
+
+**3) Что не меняется:**
+- Логика detection/trigger.
+- API/DB schema.
+- Shard assignment/owner lease semantics (исправлены в PR4a/hotfix).
+
+**4) Риски:**
+- Неверная формула backoff может дать слишком длинные паузы reconnect.
+- Избыточное логирование может увеличить шум.
+
+**5) Тесты:**
+- Unit-тесты на backoff/jitter границы.
+- Unit-тесты на расширенные ingest counters (decode/pong).
+- `pytest -q tests/test_live_ingest.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Вернуть предыдущий ingest модуль (до PR4b).
+- Оставить PR4a shard+owner фиксы активными.
+
+---
+## [2026-03-16 21:06:00] Реализовано: PR-пакет 4b (reconnect/backoff/jitter + counters/health)
+**Что сделано:**
+- `app/services/live_ingest.py`:
+  - добавлен exponential reconnect backoff с cap и jitter;
+  - расширены counters:
+    - `attempts_total`
+    - `disconnects_total`
+    - `timeouts_total`
+    - `decode_failures_total`
+    - `pongs_sent_total`
+    - `subscriptions_sent_total`
+    - `cache_age_ms`
+  - добавлен helper `_next_reconnect_delay(...)` для контролируемой задержки reconnect.
+- `app/core/config.py`:
+  - добавлены параметры:
+    - `signal_live_ws_reconnect_max_seconds`
+    - `signal_live_ws_reconnect_jitter_seconds`
+- `app/workers/mock_signal_worker.py`:
+  - `LiveShadowIngestor` инициализируется с max/jitter параметрами;
+  - лог `Shadow ingest stats` расширен новыми health counters для runtime аудита.
+- `tests/test_live_ingest.py`:
+  - добавлен тест на границы backoff/jitter delay.
+
+**Что не менялось:**
+- Detector/trigger логика.
+- API/DB schema.
+- Shard/owner lease модель из PR4a/hotfix.
+
+**Проверки:**
+- `pytest -q tests/test_live_ingest.py` -> `5 passed`.
+- `pytest -q` -> `29 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Откат PR4b commit.
+- Сохранить PR4a/hotfix как стабильный baseline.
+
+---
 ## [2026-03-16 20:32:00] Планируемые правки: PR-пакет 4a-hotfix (shard uniqueness + runtime_state truth)
 **1) Список изменяемых файлов:**
 - `CUR`

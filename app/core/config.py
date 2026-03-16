@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     signal_live_ws_url: str = "wss://open-api-ws.bingx.com/market"
     signal_live_shadow_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT"
     signal_live_ws_reconnect_seconds: float = 3.0
+    signal_live_ws_reconnect_max_seconds: float = 20.0
+    signal_live_ws_reconnect_jitter_seconds: float = 0.75
     signal_live_shadow_log_interval_cycles: int = 3
     signal_live_ingest_owner_lock_ttl_seconds: int = 90
     worker_shard_slot_lock_ttl_seconds: int = 600

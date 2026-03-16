@@ -64,3 +64,21 @@ def test_extract_pong_variants() -> None:
     assert ingest._extract_pong({"ping": 1}) == {"pong": 1}
     assert ingest._extract_pong({"op": "ping", "ts": 2}) == {"op": "pong", "ts": 2}
     assert ingest._extract_pong({"hello": "world"}) is None
+
+
+def test_reconnect_backoff_delay_bounds() -> None:
+    cache = MarketStateCache()
+    ingest = LiveShadowIngestor(
+        cache=cache,
+        symbols=["BTC/USDT"],
+        ws_url="wss://open-api-ws.bingx.com/market",
+        reconnect_delay_seconds=2.0,
+        reconnect_max_delay_seconds=10.0,
+        reconnect_jitter_seconds=0.5,
+    )
+    delay1 = ingest._next_reconnect_delay(1)
+    delay3 = ingest._next_reconnect_delay(3)
+    delay10 = ingest._next_reconnect_delay(10)
+    assert 2.0 <= delay1 <= 2.5
+    assert 8.0 <= delay3 <= 8.5
+    assert 10.0 <= delay10 <= 10.5

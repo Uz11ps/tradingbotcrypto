@@ -974,6 +974,8 @@ async def main() -> None:
             symbols=symbols,
             ws_url=settings.signal_live_ws_url,
             reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+            reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
+            reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
         )
         shadow_stop_event = asyncio.Event()
         shadow_task = asyncio.create_task(
@@ -1028,6 +1030,8 @@ async def main() -> None:
                         symbols=shadow_symbols,
                         ws_url=settings.signal_live_ws_url,
                         reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+                        reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
+                        reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
                     )
                     shadow_stop_event = asyncio.Event()
                     shadow_task = asyncio.create_task(
@@ -1092,14 +1096,23 @@ async def main() -> None:
                 stats = shadow_ingestor.stats
                 log.info(
                     (
-                        "Shadow ingest stats: connected=%s reconnects=%d errors=%d "
-                        "messages=%d updates=%d symbols=%d points=%d last_event_ts_ms=%d"
+                        "Shadow ingest stats: connected=%s attempts=%d reconnects=%d "
+                        "disconnects=%d timeouts=%d errors=%d decode_failures=%d "
+                        "pongs_sent=%d subscriptions_sent=%d messages=%d updates=%d "
+                        "cache_age_ms=%d symbols=%d points=%d last_event_ts_ms=%d"
                     ),
                     stats.connected,
+                    stats.attempts_total,
                     stats.reconnects,
+                    stats.disconnects_total,
+                    stats.timeouts_total,
                     stats.errors_total,
+                    stats.decode_failures_total,
+                    stats.pongs_sent_total,
+                    stats.subscriptions_sent_total,
                     stats.messages_total,
                     stats.updates_total,
+                    stats.cache_age_ms,
                     shadow_cache.symbols_count(),
                     shadow_cache.points_count(),
                     stats.last_event_ts_ms,
