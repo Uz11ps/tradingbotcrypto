@@ -38,13 +38,15 @@ def _parse_tfs(raw: str | None) -> list[str]:
 
 
 def get_global_defaults() -> EffectiveUserSettings:
+    default_min_move = 5.0
     return EffectiveUserSettings(
         lower_rsi=float(settings.rsi_default_lower),
         upper_rsi=float(settings.rsi_default_upper),
         active_timeframes=_parse_tfs(settings.rsi_default_timeframes),
-        min_price_move_pct=5.0,
+        min_price_move_pct=default_min_move,
         min_quote_volume=float(settings.bingx_min_quote_volume),
-        price_change_15m_trigger_pct=float(settings.signal_price_change_15m_trigger_pct),
+        # Keep 15m trigger aligned with user threshold to avoid hidden defaults.
+        price_change_15m_trigger_pct=default_min_move,
         signal_side_mode="all",
         market_type="both",
         feed_mode_enabled=True,
@@ -66,19 +68,20 @@ async def get_effective_settings(
     if not row:
         return defaults
 
+    resolved_min_move = (
+        float(row.min_price_move_pct)
+        if row.min_price_move_pct is not None
+        else defaults.min_price_move_pct
+    )
     return EffectiveUserSettings(
         lower_rsi=float(row.lower_rsi) if row.lower_rsi is not None else defaults.lower_rsi,
         upper_rsi=float(row.upper_rsi) if row.upper_rsi is not None else defaults.upper_rsi,
         active_timeframes=_parse_tfs(row.active_timeframes) if row.active_timeframes else defaults.active_timeframes,
-        min_price_move_pct=(
-            float(row.min_price_move_pct)
-            if row.min_price_move_pct is not None
-            else defaults.min_price_move_pct
-        ),
+        min_price_move_pct=resolved_min_move,
         min_quote_volume=(
             float(row.min_quote_volume) if row.min_quote_volume is not None else defaults.min_quote_volume
         ),
-        price_change_15m_trigger_pct=defaults.price_change_15m_trigger_pct,
+        price_change_15m_trigger_pct=resolved_min_move,
         signal_side_mode=normalize_signal_side_mode(row.signal_side_mode),
         market_type=normalize_market_type(row.market_type),
         feed_mode_enabled=(

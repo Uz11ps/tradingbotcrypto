@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     signal_live_shadow_log_interval_cycles: int = 3
     signal_live_ingest_owner_lock_ttl_seconds: int = 90
     worker_shard_slot_lock_ttl_seconds: int = 600
+    worker_shard_slot_retry_interval_seconds: float = 3.0
 
     log_level: str = "INFO"
 

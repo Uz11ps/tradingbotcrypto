@@ -510,14 +510,32 @@ async def _run_rsi_mode(
         # Keep RSI relaxed regardless of older per-chat strict values.
         lower_rsi = max(float(effective.get("lower_rsi", settings.rsi_default_lower)), 40.0)
         upper_rsi = min(float(effective.get("upper_rsi", settings.rsi_default_upper)), 60.0)
-        trigger_5m = float(effective.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct))
-        trigger_15m = float(
-            effective.get("price_change_15m_trigger_pct", settings.signal_price_change_15m_trigger_pct)
+        selected_threshold = float(
+            effective.get("min_price_move_pct", settings.signal_price_change_5m_trigger_pct)
         )
+        trigger_5m = selected_threshold
+        trigger_15m = float(
+            effective.get("price_change_15m_trigger_pct", selected_threshold)
+        )
+        # Protect against hidden lower thresholds in mixed config payloads.
+        if trigger_15m < selected_threshold:
+            trigger_15m = selected_threshold
         side_mode = str(effective.get("signal_side_mode", "all"))
         trigger_mode = str(settings.signal_trigger_mode).strip().lower() or "candle"
         if trigger_mode not in {"candle", "live_spike", "both"}:
             trigger_mode = "candle"
+        log.info(
+            (
+                "settings_trace chat_id=%s selected_tf=%s effective_tf=%s "
+                "selected_threshold=%.4f effective_threshold=%.4f trigger_mode=%s"
+            ),
+            chat_id,
+            ",".join(active_timeframes),
+            ",".join(active_timeframes),
+            selected_threshold,
+            max(trigger_5m, trigger_15m),
+            trigger_mode,
+        )
         market_types = _resolve_market_types(str(effective.get("market_type", "both")))
         if not settings.signal_enable_futures_adapter:
             has_futures = "futures" in market_types
@@ -621,6 +639,11 @@ async def _run_rsi_mode(
                                     "price_change_15m": snapshot.price_change_15m,
                                     "live_change_pct": live_change_pct,
                                     "trigger_mode": trigger_mode,
+                                    "selected_tf": active_timeframes,
+                                    "effective_tf": timeframe,
+                                    "effective_threshold": (
+                                        trigger_5m if timeframe == "5m" else trigger_15m
+                                    ),
                                 },
                             )
                         else:
@@ -639,6 +662,20 @@ async def _run_rsi_mode(
                                 and abs(candidate.pct_change) < trigger_5m
                             )
                             if (not is_valid) or min_move_blocked:
+                                effective_threshold = trigger_5m if timeframe == "5m" else trigger_15m
+                                if min_move_blocked:
+                                    log.info(
+                                        (
+                                            "decision_trace reject_user_min_move chat_id=%s symbol=%s tf=%s "
+                                            "change=%.4f threshold=%.4f trigger_mode=%s"
+                                        ),
+                                        chat_id,
+                                        candidate.symbol,
+                                        candidate.timeframe,
+                                        candidate.pct_change,
+                                        effective_threshold,
+                                        trigger_mode,
+                                    )
                                 await _debug_raw_candidate(
                                     client,
                                     chat_id=chat_id,
@@ -655,6 +692,9 @@ async def _run_rsi_mode(
                                     payload={
                                         "pct_change": candidate.pct_change,
                                         "rsi": candidate.rsi_value,
+                                        "selected_tf": active_timeframes,
+                                        "effective_tf": timeframe,
+                                        "effective_threshold": effective_threshold,
                                     },
                                 )
                             elif not matches_signal_side_mode(side_mode, signal_type=candidate.signal_type):
@@ -725,6 +765,21 @@ async def _run_rsi_mode(
                                         await bot.send_message(
                                             chat_id,
                                             format_signal_card(candidate, live_price=live_price),
+                                        )
+                                        effective_threshold = (
+                                            trigger_5m if timeframe == "5m" else trigger_15m
+                                        )
+                                        log.info(
+                                            (
+                                                "decision_trace signal_sent chat_id=%s symbol=%s tf=%s "
+                                                "change=%.4f threshold=%.4f trigger_source=%s"
+                                            ),
+                                            chat_id,
+                                            candidate.symbol,
+                                            candidate.timeframe,
+                                            candidate.pct_change,
+                                            effective_threshold,
+                                            candidate.trigger_source,
                                         )
                                         sent_in_cycle += 1
                                         await _debug_scan_event(
@@ -906,7 +961,10 @@ async def main() -> None:
     shadow_stop_event: asyncio.Event | None = None
     shadow_task: asyncio.Task[None] | None = None
     shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
-    if settings.worker_shard_index < 0 and settings.redis_url:
+    strict_shard_mode = settings.worker_shard_index < 0 and bool(settings.redis_url)
+    if strict_shard_mode:
+        shard_index = -1
+    if strict_shard_mode:
         try:
             redis_lease_client = Redis.from_url(settings.redis_url, decode_responses=True)
             shard_slot_guard = _RedisShardSlotGuard(
@@ -1015,6 +1073,8 @@ async def main() -> None:
                 refreshed_slot = await shard_slot_guard.acquire_or_renew()
                 if refreshed_slot is not None:
                     shard_index = refreshed_slot
+                else:
+                    shard_index = -1
             if settings.signal_shadow_mode_enabled and ingest_lease is not None:
                 is_owner_now = await ingest_lease.try_acquire_or_renew()
                 if is_owner_now and not ingest_lease_state.acquired_once:
@@ -1058,13 +1118,23 @@ async def main() -> None:
                     shadow_cache = None
                     log.warning("Shadow ingest ownership lost: stopping local ingest task")
             if settings.signal_engine_mode == "rsi":
-                assigned_symbols_count_last = await _run_rsi_mode(
-                    client,
-                    bot,
-                    filters,
-                    shard_index,
-                    shard_count,
-                )
+                if shard_index >= 0:
+                    assigned_symbols_count_last = await _run_rsi_mode(
+                        client,
+                        bot,
+                        filters,
+                        shard_index,
+                        shard_count,
+                    )
+                else:
+                    assigned_symbols_count_last = -1
+                    log.warning(
+                        "RSI worker skipping scan: no shard slot acquired (identity=%s, count=%s)",
+                        worker_identity,
+                        shard_count,
+                    )
+                    await asyncio.sleep(max(0.5, settings.worker_shard_slot_retry_interval_seconds))
+                    continue
             else:
                 await _run_legacy_mode(client, bot)
                 assigned_symbols_count_last = -1

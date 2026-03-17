@@ -1,6 +1,135 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-17 22:04:00] Планируемые правки: PR5a (trust/correctness: settings+TF observability)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/services/user_settings.py`
+- `app/workers/mock_signal_worker.py`
+- `tests/test_user_settings.py` (новый)
+
+**2) Точная цель:**
+- Устранить рассинхрон пользовательского порога и реального decision threshold:
+  - для текущей модели применять `min_price_move_pct` как единый базовый trigger порог для 5m/15m feed decision;
+  - убрать скрытый 15m default, который может обходить пользовательскую настройку.
+- Добавить обязательную observability-цепочку по настройкам/ТФ прямо в worker-логах:
+  - `selected_tf`, `effective_tf`, `selected_threshold`, `effective_threshold`, `trigger_mode`, `chat_id`.
+
+**3) Что не меняется:**
+- Fallback-логика timeframe (формализация отдельно в PR5b).
+- Cache/state scaling, sharding, universe growth.
+- UI формат сигнала (`close` removal отдельно в PR5c).
+
+**4) Риски:**
+- Возможно снижение количества сигналов при более строгом применении пользовательского порога.
+- Риск повышенного лог-шума (ограничивается логом один раз на chat/cycle).
+
+**5) Тесты:**
+- Новый unit-тест на resolution дефолтных settings (`tests/test_user_settings.py`).
+- `pytest -q tests/test_user_settings.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Вернуть предыдущую схему threshold resolution в `user_settings.py` и `mock_signal_worker.py`.
+- Оставить observability-логи отключаемыми через уровень логирования.
+
+---
+## [2026-03-17 22:18:00] Реализовано: PR5a (trust/correctness: settings+TF observability)
+**Что сделано:**
+- `app/services/user_settings.py`:
+  - устранён скрытый 15m-default:
+    - `price_change_15m_trigger_pct` выровнен с `min_price_move_pct` в defaults;
+    - в effective settings `price_change_15m_trigger_pct` теперь вычисляется из реального `min_price_move_pct` пользователя.
+- `app/workers/mock_signal_worker.py`:
+  - добавлен `settings_trace` лог (для каждого chat/cycle):
+    - `selected_tf`, `effective_tf`, `selected_threshold`, `effective_threshold`, `trigger_mode`.
+  - добавлен `decision_trace` лог:
+    - `reject_user_min_move` с `change` и `threshold`;
+    - `signal_sent` с `change`, `threshold`, `trigger_source`.
+  - усилен threshold binding в feed-eval:
+    - `trigger_5m = selected_threshold`;
+    - `trigger_15m` не может быть ниже `selected_threshold`.
+- добавлен unit-тест `tests/test_user_settings.py` на выравнивание default-порогов.
+
+**Что не менялось:**
+- TF fallback semantics (отдельно PR5b).
+- live-only формат Telegram карточки (отдельно PR5c).
+- cache/state scaling и universe rollout.
+
+**Проверки:**
+- `$env:PYTHONPATH='.'; pytest -q tests/test_user_settings.py` -> `1 passed`.
+- `$env:PYTHONPATH='.'; pytest -q` -> `30 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Команды runtime-подтверждения (после деплоя) и что ищем:**
+- `docker compose logs --since=15m signal_worker | grep "settings_trace"`
+  - ищем совпадение `selected_threshold` и `effective_threshold`, корректный `effective_tf`.
+- `docker compose logs --since=15m signal_worker | grep "decision_trace reject_user_min_move"`
+  - ищем отказы ниже порога с корректным `change < threshold`.
+- `docker compose logs --since=15m signal_worker | grep "decision_trace signal_sent"`
+  - проверяем, что отправленные сигналы не нарушают `change >= threshold`.
+
+**Rollback-план:**
+- Откат изменений в `user_settings.py` и `mock_signal_worker.py`.
+- Возврат к предыдущей модели порогов до PR5a.
+
+---
+## [2026-03-16 21:22:00] Планируемые правки: PR-пакет 4c (strict unique shard assignment, без detector changes)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/workers/mock_signal_worker.py`
+- `app/core/config.py`
+
+**2) Точная цель:**
+- Принудительно исключить дубли shard-сканирования:
+  - если worker не захватил уникальный shard slot через Redis, он не сканирует рынок;
+  - scanning разрешается только при валидном slot `0..N-1`.
+- Сохранить текущую owner-lease модель shadow ingest без изменения detector.
+
+**3) Что не меняется:**
+- Detector/trigger логика.
+- API/DB schema.
+- Reconnect/backoff/jitter из PR4b.
+
+**4) Риски:**
+- При проблемах Redis часть воркеров может временно не сканировать (предпочтительно дублированию).
+
+**5) Тесты:**
+- `pytest -q`
+- runtime-проверка:
+  - `runtime_state` без дублирующих shard index среди активных сканеров;
+  - отсутствие параллельного скана одинаковых символов разными shard.
+
+**6) Rollback-план:**
+- Вернуть предыдущий commit PR4b.
+- В аварийном режиме выставить фиксированный `WORKER_SHARD_INDEX` для single-worker fallback.
+
+---
+## [2026-03-16 21:30:00] Реализовано: PR-пакет 4c (strict unique shard assignment, без detector changes)
+**Что сделано:**
+- `app/workers/mock_signal_worker.py`:
+  - включен strict shard mode при `WORKER_SHARD_INDEX < 0` и доступном Redis:
+    - если slot не получен, `shard_index=-1` и scan пропускается;
+    - scan запускается только при валидном shard slot `0..N-1`;
+  - добавлен явный warning-log при пропуске скана из-за отсутствия shard slot;
+  - добавлен retry interval между повторными попытками получить shard slot.
+- `app/core/config.py`:
+  - добавлен `worker_shard_slot_retry_interval_seconds`.
+
+**Что не менялось:**
+- Detector/trigger логика.
+- API/DB schema.
+- Reconnect/backoff/jitter и owner lease логика из PR4b/PR4a.
+
+**Проверки:**
+- `pytest -q` -> `29 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Rollback-план:**
+- Откат на PR4b commit.
+- При необходимости временно задать фиксированный `WORKER_SHARD_INDEX` для аварийного режима.
+
+---
 ## [2026-03-16 20:55:00] Планируемые правки: PR-пакет 4b (reconnect/backoff/jitter + counters/health)
 **1) Список изменяемых файлов:**
 - `CUR`
