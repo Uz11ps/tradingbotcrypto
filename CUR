@@ -1,6 +1,39 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-17 23:38:00] Реализовано: PR5b-hotfix (NameError в strategy ветке после TF refactor)
+**Что произошло (prod):**
+- В логах зафиксирован крэш воркера после `Failed to save/send RSI feed alert ...`:
+  - `NameError: name 'timeframe' is not defined` в `app/workers/mock_signal_worker.py` внутри strategy-блока.
+- Ошибка проявилась после PR5b (refactor selected/evaluation timeframe), где в части strategy осталась старая переменная `timeframe`.
+
+**Что сделано:**
+- `app/workers/mock_signal_worker.py`:
+  - в strategy-блоке заменены остаточные ссылки `timeframe` -> `selected_tf`:
+    - `fetch_recent_bars(... timeframe=selected_tf ...)`
+    - `detect_pinbar_strategy_signal(... timeframe=selected_tf ...)`
+    - debug/reject payload в `_debug_raw_candidate` теперь также использует `selected_tf`.
+
+**Что не менялось:**
+- Алгоритм live_spike fallback (`_resolve_evaluation_window`) и decision semantics.
+- Логика dedup/cooldown и shard lease.
+- Формат Telegram карточки.
+
+**Риски:**
+- Низкие: точечный fix переменной без изменения бизнес-логики.
+
+**Проверки (локально):**
+- `$env:PYTHONPATH='.'; pytest -q tests/test_worker_timeframe_fallback.py` -> `3 passed`.
+- `$env:PYTHONPATH='.'; pytest -q` -> `33 passed`.
+
+**Что важно по логам:**
+- `TelegramForbiddenError: bot was blocked by the user` — это ожидаемое поведение для конкретного `chat_id` и не является причиной падения воркера.
+- Критическая причина рестартов — именно `NameError`, устранена этим hotfix.
+
+**Rollback-план:**
+- Откатить изменение в `app/workers/mock_signal_worker.py` до предыдущего коммита PR5b.
+
+---
 ## [2026-03-17 22:04:00] Планируемые правки: PR5a (trust/correctness: settings+TF observability)
 **1) Список изменяемых файлов:**
 - `CUR`

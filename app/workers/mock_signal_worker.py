@@ -888,10 +888,14 @@ async def _run_rsi_mode(
 
                     if strategy_mode_enabled and sent_in_cycle < max_signals_per_cycle:
                         try:
-                            bars = await fetch_recent_bars(symbol=symbol, timeframe=timeframe, limit=120)
+                            bars = await fetch_recent_bars(
+                                symbol=symbol,
+                                timeframe=selected_tf,
+                                limit=120,
+                            )
                             strategy_candidate = detect_pinbar_strategy_signal(
                                 symbol=symbol,
-                                timeframe=timeframe,
+                                timeframe=selected_tf,
                                 bars=bars,
                                 generated_at=snapshot.generated_at,
                                 market_type=market_type,
@@ -904,12 +908,12 @@ async def _run_rsi_mode(
                                 client,
                                 chat_id=chat_id,
                                 symbol=symbol,
-                                timeframe=timeframe,
+                                timeframe=selected_tf,
                                 market_type=market_type,
                                 mode="strategy",
                                 decision="reject",
                                 reject_reason="reject_no_strategy_setup",
-                                payload={"timeframe": timeframe},
+                                payload={"timeframe": selected_tf},
                             )
                             continue
 
