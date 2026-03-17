@@ -40,7 +40,7 @@ class Signal(Base):
     strength: Mapped[float] = mapped_column(Float)  # 0..1
     action: Mapped[str] = mapped_column(String(16))  # entry/exit/hold
 
-    signal_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    signal_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     market_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     trigger_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     rsi_value: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -129,7 +129,7 @@ class ScanLog(Base):
     timeframe: Mapped[str] = mapped_column(String(16), index=True)
     market_type: Mapped[str] = mapped_column(String(16), index=True)
     mode: Mapped[str] = mapped_column(String(16), index=True)
-    event: Mapped[str] = mapped_column(String(32), index=True)
+    event: Mapped[str] = mapped_column(String(64), index=True)
     details: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON string
 
 

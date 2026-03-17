@@ -1,6 +1,45 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-17 23:58:00] Реализовано: PR5d-hotfix (API 500 на /signals и /telemetry/scan-logs из-за VARCHAR лимитов)
+**Что произошло (prod):**
+- `POST /telemetry/scan-logs` падал с `StringDataRightTruncationError: value too long for type character varying(32)`.
+- `POST /signals` периодически падал `500` для strategy-сигналов, т.к. `signal_type` длиннее `VARCHAR(16)`.
+
+**Корневая причина:**
+- Новые значения после live/strategy refactor стали длиннее исторических ограничений БД:
+  - `scan_logs.event` (`VARCHAR(32)`) не вмещал `futures_excluded_adapter_disabled`.
+  - `signals.signal_type` (`VARCHAR(16)`) не вмещал `post_pump_pullback_short` / `post_dump_bounce_long`.
+
+**Что сделано:**
+- `app/db/models.py`:
+  - `signals.signal_type` расширен до `String(32)`.
+  - `scan_logs.event` расширен до `String(64)`.
+- `app/db/init.py`:
+  - добавлены idempotent schema-upgrade команды:
+    - `ALTER TABLE signals ALTER COLUMN signal_type TYPE VARCHAR(32)`;
+    - `ALTER TABLE scan_logs ALTER COLUMN event TYPE VARCHAR(64)`.
+- `app/api/router.py`:
+  - добавлен safety-normalizer `_fit_varchar(...)`;
+  - в `/signals` и `/telemetry/scan-logs` значения приводятся к лимитам колонок перед записью, чтобы исключить runtime 500 при будущих длинных значениях.
+
+**Что не менялось:**
+- Логика детекции pump/dump и TF fallback.
+- Shard lease модель и распределение universe.
+
+**Проверки (локально):**
+- `$env:PYTHONPATH='.'; pytest -q` -> `33 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Runtime-критерий успеха после деплоя:**
+- `POST /signals` -> `HTTP 200`.
+- `POST /telemetry/scan-logs` -> `HTTP 200`.
+- В API логах отсутствует `StringDataRightTruncationError`.
+
+**Rollback-план:**
+- Откатить изменения в `app/db/models.py`, `app/db/init.py`, `app/api/router.py` до предыдущего коммита.
+
+---
 ## [2026-03-17 23:38:00] Реализовано: PR5b-hotfix (NameError в strategy ветке после TF refactor)
 **Что произошло (prod):**
 - В логах зафиксирован крэш воркера после `Failed to save/send RSI feed alert ...`:

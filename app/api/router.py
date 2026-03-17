@@ -65,6 +65,13 @@ router = APIRouter()
 ALLOWED_SOURCES = {"cex", "dex", "hybrid"}
 
 
+def _fit_varchar(value: str | None, max_len: int) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text[:max_len] if len(text) > max_len else text
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -267,14 +274,14 @@ async def create_signal(
             ) from e
 
     s = Signal(
-        symbol=payload.symbol,
-        timeframe=payload.timeframe,
+        symbol=_fit_varchar(payload.symbol, 32),
+        timeframe=_fit_varchar(payload.timeframe, 16),
         direction=direction,
         strength=payload.strength,
-        action=payload.action,
-        signal_type=signal_type,
-        market_type=payload.market_type,
-        trigger_source=payload.trigger_source,
+        action=_fit_varchar(payload.action, 16),
+        signal_type=_fit_varchar(signal_type, 32),
+        market_type=_fit_varchar(payload.market_type, 16),
+        trigger_source=_fit_varchar(payload.trigger_source, 32),
         rsi_value=payload.rsi_value,
         prev_price=payload.prev_price,
         price=payload.price,
@@ -795,11 +802,11 @@ async def create_scan_log(
 ) -> dict[str, bool]:
     row = ScanLog(
         chat_id=payload.chat_id,
-        symbol=payload.symbol,
-        timeframe=payload.timeframe,
-        market_type=payload.market_type,
-        mode=payload.mode,
-        event=payload.event,
+        symbol=_fit_varchar(payload.symbol, 32),
+        timeframe=_fit_varchar(payload.timeframe, 16),
+        market_type=_fit_varchar(payload.market_type, 16),
+        mode=_fit_varchar(payload.mode, 16),
+        event=_fit_varchar(payload.event, 64),
         details=json.dumps(payload.details) if payload.details is not None else None,
     )
     session.add(row)
