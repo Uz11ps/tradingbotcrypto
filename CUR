@@ -74,6 +74,97 @@
 - Возврат к предыдущей модели порогов до PR5a.
 
 ---
+## [2026-03-17 23:05:00] Операционные наблюдения: PR5a deployment validation (prod)
+**Что подтверждено логами:**
+- после деплоя и очистки stale shard-slot ключей:
+  - `RSI shard 0..4` активны, скан идет стабильно;
+  - `settings_trace` присутствует в рабочих циклах на активных воркерах.
+- по `settings_trace` подтверждено совпадение выбранных и effective параметров:
+  - `selected_threshold=5.0000`
+  - `effective_threshold=5.0000`
+  - `selected_tf` / `effective_tf` согласованы.
+
+**Что выявлено дополнительно:**
+- при scale > `WORKER_SHARD_COUNT` часть воркеров закономерно уходит в standby (`worker_shard_index=-1`).
+- повторно подтверждено: stale Redis slot lease может временно блокировать reacquire после recreate (лечится controlled cleanup slot keys).
+- за окно проверки не зафиксировано `decision_trace reject_user_min_move` (не обязательно дефект; зависит от потока кандидатов), при этом enforcement флаг в `.env` явно включен: `SIGNAL_DISABLE_DOUBLE_MIN_MOVE_FILTER=false`.
+- есть отдельная runtime-проблема API telemetry:
+  - `POST /telemetry/scan-logs` -> `HTTP 500` (вне scope PR5a, выносится отдельным hotfix-пунктом).
+
+---
+## [2026-03-17 23:10:00] Планируемые правки: PR5b (timeframe fallback formalization + explicit logs)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `app/workers/mock_signal_worker.py`
+- `tests/test_worker_timeframe_fallback.py` (новый)
+
+**2) Точная цель:**
+- Явно формализовать fallback-поведение timeframe для live_spike/both режимов:
+  - если выбран `1h` или `4h`, live trigger-window явно фиксируется как 15m-window (900s) с пометкой fallback;
+  - убрать скрытое поведение без объяснения в логах.
+- Добавить обязательные decision/log поля:
+  - `selected_tf`, `evaluation_tf`, `window_seconds`, `fallback_applied`, `fallback_reason`.
+
+**3) Что не меняется:**
+- UI карточка сигнала (live-only формат отдельно в PR5c).
+- Cache/state scaling и universe rollout.
+- dedup/anti-flip логика.
+
+**4) Риски:**
+- Рост лог-объема из-за fallback trace (смягчается краткими структурными полями).
+
+**5) Тесты:**
+- Unit-тесты на resolution fallback mapping.
+- `pytest -q tests/test_worker_timeframe_fallback.py`
+- `pytest -q`
+
+**6) Rollback-план:**
+- Вернуть предыдущую схему trigger-window resolution в worker.
+- Удалить fallback trace поля из decision payload/logs.
+
+---
+## [2026-03-17 23:22:00] Реализовано: PR5b (timeframe fallback formalization + explicit logs)
+**Что сделано:**
+- `app/workers/mock_signal_worker.py`:
+  - добавлен явный resolver `_resolve_evaluation_window(...)`:
+    - `live_spike/both`:
+      - `5m` -> `evaluation_tf=5m`, `window_seconds=300`;
+      - `15m` -> `evaluation_tf=15m`, `window_seconds=900`;
+      - `1h/4h` -> fallback `evaluation_tf=15m`, `window_seconds=900`, `fallback_reason=live_trigger_window_fallback_to_15m`.
+    - `candle`:
+      - `5m/15m/1h/4h` остаются без fallback.
+  - добавлен `tf_fallback_trace` лог:
+    - `selected_tf`, `evaluation_tf`, `window_seconds`, `fallback_reason`, `trigger_mode`.
+  - в decision/raw telemetry payload добавлены:
+    - `selected_tf`, `effective_tf`, `window_seconds`, `fallback_applied`, `fallback_reason`.
+  - исправлена проверка `reject_user_min_move`:
+    - threshold выбирается по `evaluation_tf` (`5m` vs non-`5m`), а не жестко по `trigger_5m`.
+  - `decision_trace signal_sent` расширен полями `eval_tf/window_seconds/fallback`.
+- добавлен unit-test `tests/test_worker_timeframe_fallback.py` (3 кейса fallback mapping).
+
+**Что не менялось:**
+- UI карточка сигнала (live-only формат отдельно PR5c).
+- cache/state scaling, worker scaling и universe rollout.
+- dedup/anti-flip.
+
+**Проверки:**
+- `$env:PYTHONPATH='.'; pytest -q tests/test_worker_timeframe_fallback.py` -> `3 passed`.
+- `$env:PYTHONPATH='.'; pytest -q` -> `33 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Команды runtime-подтверждения (после деплоя) и что ищем:**
+- `docker compose logs --since=15m signal_worker | grep "tf_fallback_trace"`
+  - ищем явные fallback события для `selected_tf=1h/4h` в `live_spike/both`.
+- `docker compose logs --since=15m signal_worker | grep "decision_trace signal_sent"`
+  - подтверждаем присутствие `eval_tf/window_seconds/fallback`.
+- `docker compose logs --since=15m signal_worker | grep "decision_trace reject_user_min_move"`
+  - проверяем, что reject threshold рассчитывается по `evaluation_tf`.
+
+**Rollback-план:**
+- Вернуть предыдущую схему evaluation window без explicit fallback.
+- Убрать fallback trace поля из decision/raw payload.
+
+---
 ## [2026-03-16 21:22:00] Планируемые правки: PR-пакет 4c (strict unique shard assignment, без detector changes)
 **1) Список изменяемых файлов:**
 - `CUR`

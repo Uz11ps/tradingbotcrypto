@@ -189,6 +189,31 @@ def _resolve_market_types(mode: str) -> list[str]:
     return ["spot", "futures"]
 
 
+def _resolve_evaluation_window(
+    *,
+    selected_tf: str,
+    trigger_mode: str,
+) -> tuple[str, int, bool, str | None]:
+    tf = (selected_tf or "15m").strip()
+    # For live_spike/both we currently have only 5m/15m live trigger windows.
+    if trigger_mode in {"live_spike", "both"}:
+        if tf == "5m":
+            return tf, 300, False, None
+        if tf == "15m":
+            return tf, 900, False, None
+        return "15m", 900, True, "live_trigger_window_fallback_to_15m"
+    # Candle mode keeps direct selected timeframe mapping.
+    if tf == "5m":
+        return tf, 300, False, None
+    if tf == "15m":
+        return tf, 900, False, None
+    if tf == "1h":
+        return tf, 3600, False, None
+    if tf == "4h":
+        return tf, 14400, False, None
+    return "15m", 900, True, "unsupported_timeframe_fallback_to_15m"
+
+
 def _derive_shard_index_from_identity(identity: str, shard_count: int) -> int:
     if shard_count <= 1:
         return 0
@@ -563,19 +588,46 @@ async def _run_rsi_mode(
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for market_type in market_types:
-            for timeframe in active_timeframes:
+            for selected_tf in active_timeframes:
+                (
+                    evaluation_tf,
+                    window_seconds,
+                    fallback_applied,
+                    fallback_reason,
+                ) = _resolve_evaluation_window(
+                    selected_tf=selected_tf,
+                    trigger_mode=trigger_mode,
+                )
+                if fallback_applied:
+                    log.info(
+                        (
+                            "tf_fallback_trace chat_id=%s selected_tf=%s evaluation_tf=%s "
+                            "window_seconds=%s fallback_reason=%s trigger_mode=%s"
+                        ),
+                        chat_id,
+                        selected_tf,
+                        evaluation_tf,
+                        window_seconds,
+                        fallback_reason,
+                        trigger_mode,
+                    )
                 for symbol in shard_symbols:
                     if sent_in_cycle >= max_signals_per_cycle:
                         break
                     try:
                         snapshot = await build_snapshot(
                             symbol=symbol,
-                            timeframe=timeframe,
+                            timeframe=evaluation_tf,
                             volume_avg_window=settings.signal_volume_avg_window,
                             quote_volume_24h=volume_map.get(symbol),
                         )
                     except (BinanceCandlesError, ValueError):
-                        log.exception("RSI reject: bad_data symbol=%s tf=%s", symbol, timeframe)
+                        log.exception(
+                            "RSI reject: bad_data symbol=%s tf=%s eval_tf=%s",
+                            symbol,
+                            selected_tf,
+                            evaluation_tf,
+                        )
                         continue
                     finally:
                         await asyncio.sleep(0.08)
@@ -596,7 +648,7 @@ async def _run_rsi_mode(
                             rsi_value = compute_rsi(snapshot.closes, period=settings.rsi_period)
                             candidate = evaluate_rsi_signal(
                                 symbol=symbol,
-                                timeframe=timeframe,
+                                timeframe=evaluation_tf,
                                 rsi_value=rsi_value,
                                 price_change_5m=snapshot.price_change_5m,
                                 price_change_15m=snapshot.price_change_15m,
@@ -629,7 +681,7 @@ async def _run_rsi_mode(
                                 client,
                                 chat_id=chat_id,
                                 symbol=symbol,
-                                timeframe=timeframe,
+                                timeframe=evaluation_tf,
                                 market_type=market_type,
                                 mode="feed",
                                 decision="reject",
@@ -640,9 +692,12 @@ async def _run_rsi_mode(
                                     "live_change_pct": live_change_pct,
                                     "trigger_mode": trigger_mode,
                                     "selected_tf": active_timeframes,
-                                    "effective_tf": timeframe,
+                                    "effective_tf": evaluation_tf,
+                                    "window_seconds": window_seconds,
+                                    "fallback_applied": fallback_applied,
+                                    "fallback_reason": fallback_reason,
                                     "effective_threshold": (
-                                        trigger_5m if timeframe == "5m" else trigger_15m
+                                        trigger_5m if evaluation_tf == "5m" else trigger_15m
                                     ),
                                 },
                             )
@@ -659,19 +714,26 @@ async def _run_rsi_mode(
                             
                             min_move_blocked = (
                                 (not settings.signal_disable_double_min_move_filter)
-                                and abs(candidate.pct_change) < trigger_5m
+                                and abs(candidate.pct_change)
+                                < (trigger_5m if evaluation_tf == "5m" else trigger_15m)
                             )
                             if (not is_valid) or min_move_blocked:
-                                effective_threshold = trigger_5m if timeframe == "5m" else trigger_15m
+                                effective_threshold = (
+                                    trigger_5m if evaluation_tf == "5m" else trigger_15m
+                                )
                                 if min_move_blocked:
                                     log.info(
                                         (
                                             "decision_trace reject_user_min_move chat_id=%s symbol=%s tf=%s "
+                                            "eval_tf=%s window_seconds=%s fallback=%s "
                                             "change=%.4f threshold=%.4f trigger_mode=%s"
                                         ),
                                         chat_id,
                                         candidate.symbol,
-                                        candidate.timeframe,
+                                        selected_tf,
+                                        evaluation_tf,
+                                        window_seconds,
+                                        fallback_applied,
                                         candidate.pct_change,
                                         effective_threshold,
                                         trigger_mode,
@@ -693,7 +755,10 @@ async def _run_rsi_mode(
                                         "pct_change": candidate.pct_change,
                                         "rsi": candidate.rsi_value,
                                         "selected_tf": active_timeframes,
-                                        "effective_tf": timeframe,
+                                        "effective_tf": evaluation_tf,
+                                        "window_seconds": window_seconds,
+                                        "fallback_applied": fallback_applied,
+                                        "fallback_reason": fallback_reason,
                                         "effective_threshold": effective_threshold,
                                     },
                                 )
@@ -767,16 +832,20 @@ async def _run_rsi_mode(
                                             format_signal_card(candidate, live_price=live_price),
                                         )
                                         effective_threshold = (
-                                            trigger_5m if timeframe == "5m" else trigger_15m
+                                            trigger_5m if evaluation_tf == "5m" else trigger_15m
                                         )
                                         log.info(
                                             (
                                                 "decision_trace signal_sent chat_id=%s symbol=%s tf=%s "
+                                                "eval_tf=%s window_seconds=%s fallback=%s "
                                                 "change=%.4f threshold=%.4f trigger_source=%s"
                                             ),
                                             chat_id,
                                             candidate.symbol,
-                                            candidate.timeframe,
+                                            selected_tf,
+                                            evaluation_tf,
+                                            window_seconds,
+                                            fallback_applied,
                                             candidate.pct_change,
                                             effective_threshold,
                                             candidate.trigger_source,
@@ -801,7 +870,14 @@ async def _run_rsi_mode(
                                             mode="feed",
                                             decision="accept",
                                             reject_reason=None,
-                                            payload={"pct_change": candidate.pct_change},
+                                            payload={
+                                                "pct_change": candidate.pct_change,
+                                                "selected_tf": active_timeframes,
+                                                "effective_tf": evaluation_tf,
+                                                "window_seconds": window_seconds,
+                                                "fallback_applied": fallback_applied,
+                                                "fallback_reason": fallback_reason,
+                                            },
                                         )
                                     except Exception:
                                         log.exception(
