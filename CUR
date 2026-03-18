@@ -1,6 +1,71 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-18 19:05:00] Реализовано: PR5/B3 hardening (shard fail-open + shorter slot TTL)
+**Почему сделано:**
+- В проде периодически повторялся сценарий `index=-1` на всех воркерах после recreate/scale:
+  - `RSI worker skipping scan: no shard slot acquired`.
+- Корень: stale slot-lease + длинный `worker_shard_slot_lock_ttl_seconds=600`, из-за чего cluster мог до 10 минут простаивать без скана.
+
+**Что изменено:**
+- `app/core/config.py`:
+  - `worker_shard_slot_lock_ttl_seconds`: `600 -> 120`.
+  - добавлены флаги:
+    - `worker_shard_fail_open_enabled` (default `True`);
+    - `worker_shard_fail_open_after_retries` (default `20`).
+- `app/workers/mock_signal_worker.py`:
+  - добавлен `no_slot_streak` счетчик;
+  - если слот не получен длительно (`>= fail_open_after_retries`), воркер включает fail-open:
+    - назначает fallback shard через `_derive_shard_index_from_identity(...)`;
+    - продолжает скан вместо полного standby;
+  - при успешном захвате Redis slot воркер выходит из fail-open и пишет recovery лог.
+  - `runtime_state` расширен полями:
+    - `shard_fail_open`
+    - `no_slot_streak`.
+
+**Что не менялось:**
+- Threshold/fallback логика сигналов (PR5a/PR5b).
+- API hotfix по varchar-лимитам.
+- Формат карточек в Telegram.
+
+**Ожидаемый runtime-эффект:**
+- Даже при временно залипших lease-ключах воркеры не зависают все в `index=-1`.
+- После освобождения slot-lease происходит автоматическое восстановление в нормальный shard mode.
+
+**Проверки (локально):**
+- `$env:PYTHONPATH='.'; pytest -q` -> `33 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Rollback-план:**
+- Вернуть `worker_shard_slot_lock_ttl_seconds=600`.
+- Отключить fail-open (`WORKER_SHARD_FAIL_OPEN_ENABLED=false`) и убрать изменения worker loop.
+
+---
+## [2026-03-18 18:45:00] Операционная валидация: PR5/B3 gate PASS (scale=5 shard distribution restored)
+**Что выполнено:**
+- Прод-конфиг шардирования возвращен в целевой режим:
+  - `WORKER_SHARD_INDEX=-1`
+  - `WORKER_SHARD_COUNT=5`
+  - slot-ключи `signal:worker_shard_slot:0..4` очищены перед recreate.
+- Выполнен `docker compose up -d --scale signal_worker=5 --force-recreate signal_worker`.
+
+**Лог-доказательства:**
+- `RSI worker shard setup` показал уникальные индексы `0..4`:
+  - `signal_worker-18 -> index=0`
+  - `signal_worker-20 -> index=1`
+  - `signal_worker-19 -> index=2`
+  - `signal_worker-17 -> index=3`
+  - `signal_worker-16 -> index=4`
+- `RSI shard X: N symbols to scan`:
+  - `shard 0: 14 symbols`
+  - `shard 1..4: 13 symbols`
+  - итог: распределение universe между 5 воркерами корректное, full-duplicate скан не наблюдается.
+
+**Операционный вывод:**
+- PR5/B3 gate (runtime) пройден: масштаб `5` работает как shard-mode, а не как 5 копий `shard 0`.
+- Текущий next-step по roadmap: PR6/B2 (stage-gate рост universe `500 -> 700 -> 900`) под наблюдением latency/error/signal-noise.
+
+---
 ## [2026-03-18 14:58:00] Операционная валидация утром: стабильность safe-mode + сравнение Telegram export (день 1 vs день 2)
 **Что проверено в проде:**
 - Safe-mode (`WORKER_SHARD_COUNT=1`, `WORKER_SHARD_INDEX=0`) стабилен:

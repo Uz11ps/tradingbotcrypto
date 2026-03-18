@@ -1042,6 +1042,9 @@ async def main() -> None:
     shadow_task: asyncio.Task[None] | None = None
     shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
     strict_shard_mode = settings.worker_shard_index < 0 and bool(settings.redis_url)
+    no_slot_streak = 0
+    fail_open_active = False
+    fail_open_after = max(1, int(settings.worker_shard_fail_open_after_retries))
     if strict_shard_mode:
         shard_index = -1
     if strict_shard_mode:
@@ -1136,7 +1139,8 @@ async def main() -> None:
         (
             "runtime_state worker_shard_index=%s worker_shard_total=%s "
             "assigned_symbols_count=%s shadow_ingest_owner=%s "
-            "ingest_owner_acquired=%s ingest_owner_lost=%s"
+            "ingest_owner_acquired=%s ingest_owner_lost=%s "
+            "shard_fail_open=%s no_slot_streak=%s"
         ),
         shard_index,
         shard_count,
@@ -1144,6 +1148,8 @@ async def main() -> None:
         ingest_lease_state.is_owner,
         ingest_lease_state.acquired_once,
         ingest_lease_state.lost_once,
+        fail_open_active,
+        no_slot_streak,
     )
 
     try:
@@ -1152,9 +1158,36 @@ async def main() -> None:
             if shard_slot_guard is not None:
                 refreshed_slot = await shard_slot_guard.acquire_or_renew()
                 if refreshed_slot is not None:
+                    if fail_open_active:
+                        log.info(
+                            "RSI shard fail-open recovered: acquired_slot=%s retries=%s identity=%s",
+                            refreshed_slot,
+                            no_slot_streak,
+                            worker_identity,
+                        )
+                    no_slot_streak = 0
+                    fail_open_active = False
                     shard_index = refreshed_slot
                 else:
-                    shard_index = -1
+                    no_slot_streak += 1
+                    if settings.worker_shard_fail_open_enabled and no_slot_streak >= fail_open_after:
+                        fallback_slot = _derive_shard_index_from_identity(worker_identity, shard_count)
+                        if (not fail_open_active) or shard_index != fallback_slot:
+                            log.warning(
+                                (
+                                    "RSI shard fail-open activated: fallback_slot=%s retries=%s "
+                                    "identity=%s count=%s"
+                                ),
+                                fallback_slot,
+                                no_slot_streak,
+                                worker_identity,
+                                shard_count,
+                            )
+                        shard_index = fallback_slot
+                        fail_open_active = True
+                    else:
+                        shard_index = -1
+                        fail_open_active = False
             if settings.signal_shadow_mode_enabled and ingest_lease is not None:
                 is_owner_now = await ingest_lease.try_acquire_or_renew()
                 if is_owner_now and not ingest_lease_state.acquired_once:
@@ -1272,7 +1305,8 @@ async def main() -> None:
                     (
                         "runtime_state worker_shard_index=%s worker_shard_total=%s "
                         "assigned_symbols_count=%s shadow_ingest_owner=%s "
-                        "ingest_owner_acquired=%s ingest_owner_lost=%s"
+                        "ingest_owner_acquired=%s ingest_owner_lost=%s "
+                        "shard_fail_open=%s no_slot_streak=%s"
                     ),
                     shard_index,
                     shard_count,
@@ -1280,6 +1314,8 @@ async def main() -> None:
                     ingest_lease_state.is_owner,
                     ingest_lease_state.acquired_once,
                     ingest_lease_state.lost_once,
+                    fail_open_active,
+                    no_slot_streak,
                 )
 
             await asyncio.sleep(settings.worker_interval_seconds)
