@@ -1,6 +1,37 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-18 14:58:00] Операционная валидация утром: стабильность safe-mode + сравнение Telegram export (день 1 vs день 2)
+**Что проверено в проде:**
+- Safe-mode (`WORKER_SHARD_COUNT=1`, `WORKER_SHARD_INDEX=0`) стабилен:
+  - `RSI shard 0: 56..63 symbols to scan`;
+  - есть `decision_trace signal_sent` и `decision_trace reject_user_min_move`;
+  - API по `/signals` и `/telemetry/scan-logs` отвечает `200 OK` без `500`/`StringDataRightTruncationError`.
+
+**Сравнение экспортов Telegram (`2026-03-17` vs `2026-03-18`):**
+- Источники:
+  - `C:\Users\t6are\Downloads\Telegram Desktop\ChatExport_2026-03-17\messages.html`
+  - `C:\Users\t6are\Downloads\Telegram Desktop\ChatExport_2026-03-18\messages.html`
+- Сигналы формата `Движение:`:
+  - день 1: `287`
+  - день 2: `188` (снижение шумовой нагрузки примерно на `34.5%`).
+- Подпороговые карточки `Движение: +/-4.x%`:
+  - день 1: `88`
+  - день 2: `0`
+  - вывод: фикс threshold-binding реально сработал (исчезли сигналы ниже 5%).
+- Strategy-карточки (`Сигнал: Лонг/Шорт` от Pin Bar):
+  - день 1: `0`
+  - день 2: `58` (новый поток, отдельно наблюдать и валидировать).
+
+**Ключевой риск, выявленный утром:**
+- При ручном `--scale signal_worker=5` в текущем safe-config все воркеры стартуют как `index=0 count=1` и сканируют весь universe параллельно.
+- Это не целевое shard-распределение; повышает риск дублей и лишней нагрузки.
+
+**Операционный вывод:**
+- До фикса shard-resilience (PR5/B3) держим прод в safe-mode `scale=1`.
+- Переход на `scale=5` только после восстановления корректного slot-based shard assignment (`0..4` без массового `skipping scan` и без full-duplicate скана).
+
+---
 ## [2026-03-17 23:58:00] Реализовано: PR5d-hotfix (API 500 на /signals и /telemetry/scan-logs из-за VARCHAR лимитов)
 **Что произошло (prod):**
 - `POST /telemetry/scan-logs` падал с `StringDataRightTruncationError: value too long for type character varying(32)`.
