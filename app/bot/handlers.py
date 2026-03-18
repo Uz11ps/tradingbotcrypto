@@ -50,7 +50,7 @@ def _status_line(cfg: dict[str, object], *, universe: int, min_vol: float) -> st
 def _home_text(cfg: dict[str, object], *, universe: int, min_vol: float) -> str:
     return (
         "Сигнальный бот\n\n"
-        "Сканируем BingX и отправляем сигналы.\n\n"
+        "Нажмите «Настройки» или «Лента» ниже.\n\n"
         f"{_status_line(cfg, universe=universe, min_vol=min_vol)}"
     )
 

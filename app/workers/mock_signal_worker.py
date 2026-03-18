@@ -13,6 +13,7 @@ import httpx
 from aiogram import Bot
 from redis.asyncio import Redis
 
+from app.bot.keyboards import panel_actions_kb
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.services.binance_candles import (
@@ -830,6 +831,7 @@ async def _run_rsi_mode(
                                         await bot.send_message(
                                             chat_id,
                                             format_signal_card(candidate, live_price=live_price),
+                                            reply_markup=panel_actions_kb(),
                                         )
                                         effective_threshold = (
                                             trigger_5m if evaluation_tf == "5m" else trigger_15m
@@ -971,7 +973,11 @@ async def _run_rsi_mode(
                                     ),
                                 },
                             )
-                            await bot.send_message(chat_id, format_strategy_signal_card(strategy_candidate))
+                            await bot.send_message(
+                                chat_id,
+                                format_strategy_signal_card(strategy_candidate),
+                                reply_markup=panel_actions_kb(),
+                            )
                             sent_in_cycle += 1
                             await _debug_scan_event(
                                 client,
