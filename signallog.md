@@ -72,3 +72,21 @@
 ### Зачем
 - Исключить сценарий, когда все воркеры стоят в `index=-1` и не сканируют рынок.
 - Снизить операционную зависимость от ручной очистки `signal:worker_shard_slot:*`.
+
+## 18.03 20:35 — PR7 (light) anti-duplicate/anti-flip
+
+### Что добавлено
+- Soft anti-flip guard на уровне фильтра сигналов:
+  - отслеживает быструю смену стороны `pump <-> dump` по `(scope,symbol,timeframe)`.
+  - текущий режим: `log_only=true` (сигнал не режется, только trace).
+- Введены параметры:
+  - `SIGNAL_SOFT_FLIP_WINDOW_SECONDS=300`
+  - `SIGNAL_SOFT_FLIP_MIN_MOVE_PCT=1.0`
+  - `SIGNAL_SOFT_FLIP_LOG_ONLY=true`
+
+### Почему в light-режиме
+- По фактическим логам за 12ч:
+  - `PIXEL/USDT`: `0 flips / 5 events`
+  - `ENJ/USDT`: `0 flips / 3 events`
+  - `WP/USDT`: `0 flips / 1 events`
+- То есть агрессивная фильтрация сейчас не нужна, важнее безопасная observability.

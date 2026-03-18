@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     signal_followup_move_pct: float = 1.5
     signal_repeat_guard_min_move_pct: float = 0.4
     signal_repeat_guard_min_rsi_delta: float = 2.0
+    signal_soft_flip_window_seconds: int = 300
+    signal_soft_flip_min_move_pct: float = 1.0
+    signal_soft_flip_log_only: bool = True
     signal_filter_redis_prefix: str = "signal_filter"
     signal_filter_memory_state_ttl_seconds: int = 7200
     signal_filter_memory_state_max_keys: int = 200_000

@@ -1,6 +1,45 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-18 20:35:00] Реализовано: PR7 (C1+C2 light) — мягкий anti-flip guard + observability
+**Что сделано:**
+- `app/services/signal_filters.py`:
+  - добавлен soft flip guard для быстрых разворотов по одному `(scope,symbol,timeframe)`:
+    - `soft_flip_window_seconds`
+    - `soft_flip_min_move_pct`
+    - `soft_flip_log_only`
+  - логика:
+    - если сигнал меняет сторону (`pump <-> dump`) в коротком окне и ход цены меньше порога,
+      в `log_only=true` режимe событие логируется (`soft_flip_trace allow`) и сигнал не режется;
+    - в `log_only=false` сигнал отклоняется с `RejectReason(reason="soft_flip_guard")`.
+  - реализовано как для in-memory режима, так и для Redis-backed режима (`signal_filter:side:*`).
+- `app/core/config.py`:
+  - добавлены настройки:
+    - `signal_soft_flip_window_seconds=300`
+    - `signal_soft_flip_min_move_pct=1.0`
+    - `signal_soft_flip_log_only=True` (безопасный non-destructive default).
+- `app/workers/mock_signal_worker.py`:
+  - `SignalFilterEngine` получает новые soft flip параметры из settings.
+- `tests/test_signal_filters.py`:
+  - добавлены тесты:
+    - `test_soft_flip_log_only_allows_signal`
+    - `test_soft_flip_strict_rejects_signal`
+
+**Что не менялось:**
+- Базовые пороги `min_price_move_pct` и TF fallback semantics.
+- Shard lease hardening из PR5/B3.
+- API-слой и формат карточек.
+
+**Проверки:**
+- `$env:PYTHONPATH='.'; pytest -q tests/test_signal_filters.py` -> `5 passed`.
+- `$env:PYTHONPATH='.'; pytest -q` -> `35 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Операционный смысл этапа:**
+- На текущем рынке flips редки, поэтому включен мягкий режим (`log_only`) для безопасного наблюдения.
+- Если позже появится шумный flip-поток, можно включить строгий режим без изменения кода (`SIGNAL_SOFT_FLIP_LOG_ONLY=false`).
+
+---
 ## [2026-03-18 19:05:00] Реализовано: PR5/B3 hardening (shard fail-open + shorter slot TTL)
 **Почему сделано:**
 - В проде периодически повторялся сценарий `index=-1` на всех воркерах после recreate/scale:

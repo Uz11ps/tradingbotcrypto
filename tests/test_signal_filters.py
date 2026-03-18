@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -84,3 +85,46 @@ async def test_stale_repeat_blocked_even_after_cooldown() -> None:
     assert ok2 is False
     assert reject2 is not None
     assert reject2.reason == "stale_repeat"
+
+
+@pytest.mark.asyncio
+async def test_soft_flip_log_only_allows_signal() -> None:
+    engine = SignalFilterEngine(
+        cooldown_seconds=0,
+        dedup_window_seconds=0,
+        soft_flip_window_seconds=600,
+        soft_flip_min_move_pct=1.0,
+        soft_flip_log_only=True,
+    )
+    first = _candidate(current_price=100.0)
+    flip = replace(first, signal_type="dump", current_price=100.2)
+
+    ok1, reject1 = await engine.accept(first, scope="chat")
+    ok2, reject2 = await engine.accept(flip, scope="chat")
+
+    assert ok1 is True
+    assert reject1 is None
+    assert ok2 is True
+    assert reject2 is None
+
+
+@pytest.mark.asyncio
+async def test_soft_flip_strict_rejects_signal() -> None:
+    engine = SignalFilterEngine(
+        cooldown_seconds=0,
+        dedup_window_seconds=0,
+        soft_flip_window_seconds=600,
+        soft_flip_min_move_pct=1.0,
+        soft_flip_log_only=False,
+    )
+    first = _candidate(current_price=100.0)
+    flip = replace(first, signal_type="dump", current_price=100.2)
+
+    ok1, reject1 = await engine.accept(first, scope="chat")
+    ok2, reject2 = await engine.accept(flip, scope="chat")
+
+    assert ok1 is True
+    assert reject1 is None
+    assert ok2 is False
+    assert reject2 is not None
+    assert reject2.reason == "soft_flip_guard"
