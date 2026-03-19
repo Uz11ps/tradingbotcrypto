@@ -1,5 +1,16 @@
 # signalog
 
+## 19.03 21:20 - PR9/E hotfix (chat round-robin)
+
+### Что исправлено
+- Добавлен round-robin порядок обхода chat_id между циклами worker-а.
+- Добавлен trace:
+  - `chat_round_robin_trace cycle=... chat_ids=... rotated=...`
+
+### Зачем
+- Убрать залипание на одном chat_id в runtime.
+- Обеспечить стабильную обработку нескольких чатов без ручных workaround.
+
 ## 19.03 20:50 - PR9/D hotfix (fair chat scheduling)
 
 ### Что исправлено

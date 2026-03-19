@@ -257,6 +257,13 @@ def _chat_symbol_window(
     return out
 
 
+def _rotate_chat_ids(chat_ids: list[int], *, cycle_index: int) -> list[int]:
+    if not chat_ids:
+        return []
+    start = max(0, int(cycle_index)) % len(chat_ids)
+    return chat_ids[start:] + chat_ids[:start]
+
+
 def _format_market_route_trace(router: MarketProviderRouter, *, chat_id: int, requested_market_type: str) -> str:
     resolution = router.resolve(requested_market_type)
     enabled = ",".join(
@@ -534,12 +541,20 @@ async def _run_rsi_mode(
     if not chat_ids:
         log.info("RSI mode: no target chats registered yet")
         return 0
+    rotated_chat_ids = _rotate_chat_ids(chat_ids, cycle_index=cycle_index)
+    if settings.signal_market_route_trace_enabled:
+        log.info(
+            "chat_round_robin_trace cycle=%s chat_ids=%s rotated=%s",
+            cycle_index,
+            ",".join(str(x) for x in chat_ids),
+            ",".join(str(x) for x in rotated_chat_ids),
+        )
 
     route_scan_cache: dict[str, tuple[list[str], dict[str, float]]] = {}
     max_assigned_symbols = 0
     chat_symbol_budget = max(1, int(settings.signal_chat_symbol_budget_per_cycle))
 
-    for chat_id in chat_ids:
+    for chat_id in rotated_chat_ids:
         try:
             effective = await _load_effective_settings(client, chat_id=chat_id)
         except Exception:
