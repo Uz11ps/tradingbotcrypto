@@ -1,5 +1,17 @@
 # signalog
 
+## 19.03 20:50 - PR9/D hotfix (fair chat scheduling)
+
+### Что исправлено
+- Убран starvation chat-очереди в worker scan-loop при большом universe.
+- Введен bounded scan-budget на chat за цикл + ротация окна символов по циклам.
+- Добавлен trace:
+  - `chat_scan_budget_trace ... shard_symbols=... scan_symbols=...`
+
+### Ожидаемый эффект
+- `settings_trace` и decision-логи должны появляться по всем активным chat_id, а не только по одному.
+- Нет необходимости вручную удалять чаты из `user_signal_settings`.
+
 ## 19.03 02:05 - PR9 / Этап C (статистика + короткая история)
 
 ### Что добавлено

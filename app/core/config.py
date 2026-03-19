@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     signal_retention_prune_interval_seconds: int = 1800
     signal_stats_short_window_hours: int = 72
     signal_stats_short_max_rows: int = 200
+    signal_chat_symbol_budget_per_cycle: int = 120
     signal_debug_full_enabled: bool = False
     signal_debug_reject_sample_rate: float = 0.2
     signal_debug_log_limit_per_cycle: int = 500

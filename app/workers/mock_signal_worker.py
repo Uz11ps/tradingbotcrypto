@@ -235,6 +235,28 @@ def _parse_shadow_symbols(raw: str) -> list[str]:
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
 
 
+def _chat_symbol_window(
+    symbols: list[str],
+    *,
+    chat_id: int,
+    cycle_index: int,
+    budget: int,
+) -> list[str]:
+    if not symbols:
+        return []
+    effective_budget = max(1, int(budget))
+    if effective_budget >= len(symbols):
+        return symbols
+    # Rotate a contiguous scan window per chat per cycle.
+    # This prevents the first chat from monopolizing the full shard list.
+    stride = max(1, effective_budget)
+    start = ((abs(int(chat_id)) % len(symbols)) + (max(0, cycle_index) * stride)) % len(symbols)
+    out: list[str] = []
+    for i in range(effective_budget):
+        out.append(symbols[(start + i) % len(symbols)])
+    return out
+
+
 def _format_market_route_trace(router: MarketProviderRouter, *, chat_id: int, requested_market_type: str) -> str:
     resolution = router.resolve(requested_market_type)
     enabled = ",".join(
@@ -500,6 +522,7 @@ async def _run_rsi_mode(
     shard_index: int,
     shard_count: int,
     market_router: MarketProviderRouter,
+    cycle_index: int,
 ) -> int:
     try:
         chat_ids = await _list_signal_chats(client)
@@ -514,6 +537,7 @@ async def _run_rsi_mode(
 
     route_scan_cache: dict[str, tuple[list[str], dict[str, float]]] = {}
     max_assigned_symbols = 0
+    chat_symbol_budget = max(1, int(settings.signal_chat_symbol_budget_per_cycle))
 
     for chat_id in chat_ids:
         try:
@@ -619,6 +643,26 @@ async def _run_rsi_mode(
             if not shard_symbols:
                 continue
             max_assigned_symbols = max(max_assigned_symbols, len(shard_symbols))
+            chat_symbols = _chat_symbol_window(
+                shard_symbols,
+                chat_id=chat_id,
+                cycle_index=cycle_index,
+                budget=chat_symbol_budget,
+            )
+            if settings.signal_market_route_trace_enabled:
+                log.info(
+                    (
+                        "chat_scan_budget_trace chat_id=%s route=%s provider=%s "
+                        "shard_symbols=%s scan_symbols=%s cycle=%s budget=%s"
+                    ),
+                    chat_id,
+                    market_type,
+                    route.provider_name,
+                    len(shard_symbols),
+                    len(chat_symbols),
+                    cycle_index,
+                    chat_symbol_budget,
+                )
             for selected_tf in active_timeframes:
                 (
                     evaluation_tf,
@@ -642,7 +686,7 @@ async def _run_rsi_mode(
                         fallback_reason,
                         trigger_mode,
                     )
-                for symbol in shard_symbols:
+                for symbol in chat_symbols:
                     if sent_in_cycle >= max_signals_per_cycle:
                         break
                     try:
@@ -1281,6 +1325,7 @@ async def main() -> None:
                         shard_index,
                         shard_count,
                         market_router,
+                        loop_cycle,
                     )
                 else:
                     assigned_symbols_count_last = -1

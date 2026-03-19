@@ -1,6 +1,45 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-19 20:50:00] Реализовано: PR9/D hotfix (fair chat scheduling in worker loop)
+**Проблема в проде:**
+- После расширения universe (`spot+futures`) worker-цикл практически не доходил до части chat_id.
+- По логам:
+  - `GET /user-settings/chats` возвращал все чаты,
+  - но `settings_trace` стабильно появлялся только для одного chat (`916...`),
+  - остальные chat_id (`562...`, `790...`, `5164...`) не проходили полный scan-loop.
+
+**Что изменено:**
+- `app/workers/mock_signal_worker.py`:
+  - добавлен fair scheduler окна символов на chat/цикл:
+    - `_chat_symbol_window(symbols, chat_id, cycle_index, budget)`;
+  - в RSI-цикле scan теперь идет не по всему shard list для каждого chat подряд,
+    а по bounded окну (`chat_symbols`) с ротацией по `cycle_index`;
+  - в `_run_rsi_mode(...)` добавлен `cycle_index` аргумент;
+  - добавлен runtime лог:
+    - `chat_scan_budget_trace chat_id=... route=... shard_symbols=... scan_symbols=... cycle=... budget=...`
+- `app/core/config.py`:
+  - добавлен параметр `signal_chat_symbol_budget_per_cycle=120`.
+- Тесты:
+  - новый `tests/test_worker_chat_fairness.py` (budget + rotation).
+
+**Почему это не костыль:**
+- Решение системное: устраняет starvation chat-очереди при большом universe.
+- Сохраняет покрытие всех символов через ротацию окна по циклам.
+- Не требует ручной чистки `user_signal_settings`/удаления chat_id.
+
+**Проверки:**
+- `python -m pytest -q tests/test_worker_chat_fairness.py tests/test_worker_timeframe_fallback.py tests/test_market_provider_policy.py` -> `8 passed`.
+- `python -m pytest -q` -> `42 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Операционная валидация после выката:**
+- `docker compose logs --since=15m signal_worker | grep "settings_trace chat_id=562899945"`
+- `docker compose logs --since=15m signal_worker | grep "settings_trace chat_id=790218266"`
+- `docker compose logs --since=15m signal_worker | grep "chat_scan_budget_trace"`
+- ожидаем, что settings/log activity появляется по всем активным chat_id, а не только по одному.
+
+---
 ## [2026-03-19 02:30:00] Pre-deploy checkpoint: PR9 (A+B+C) + PR8.1
 **Текущий статус перед выкатом:**
 - Локальный прогон тестов: `python -m pytest -q` -> `40 passed`.
