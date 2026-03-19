@@ -13,18 +13,16 @@ import httpx
 from aiogram import Bot
 from redis.asyncio import Redis
 
-from app.bot.keyboards import panel_actions_kb
+from app.bot.keyboards import bottom_chat_menu_kb
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.services.binance_candles import (
     BinanceCandlesError,
-    build_snapshot,
-    fetch_live_price,
-    fetch_recent_bars,
 )
-from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
+from app.services.binance_universe import BinanceUniverseError
 from app.services.feed_formatter import format_signal_card, format_strategy_signal_card
 from app.services.live_ingest import LiveShadowIngestor
+from app.services.market_provider import MarketProviderRouter
 from app.services.market_state_cache import MarketStateCache
 from app.services.rsi_engine import compute_rsi, evaluate_rsi_signal, validate_candidate_filters
 from app.services.signal_filters import SignalFilterEngine
@@ -181,15 +179,6 @@ async def _prune_old_signals(client: httpx.AsyncClient) -> int:
     return int(payload.get("deleted_total", 0) or 0)
 
 
-def _resolve_market_types(mode: str) -> list[str]:
-    normalized = (mode or "both").strip().lower()
-    if normalized == "spot":
-        return ["spot"]
-    if normalized == "futures":
-        return ["futures"]
-    return ["spot", "futures"]
-
-
 def _resolve_evaluation_window(
     *,
     selected_tf: str,
@@ -244,6 +233,28 @@ def _pct_change(prev_value: float, current_value: float) -> float:
 
 def _parse_shadow_symbols(raw: str) -> list[str]:
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
+def _format_market_route_trace(router: MarketProviderRouter, *, chat_id: int, requested_market_type: str) -> str:
+    resolution = router.resolve(requested_market_type)
+    enabled = ",".join(
+        f"{route.market_type}:{route.provider_name}"
+        for route in resolution.enabled_routes
+    ) or "-"
+    skipped = ",".join(
+        f"{route.market_type}:{route.reason or '-'}"
+        for route in resolution.skipped_routes
+    ) or "-"
+    policy = "futures_adapter_enabled" if router.futures_adapter_enabled else "futures_adapter_disabled"
+    return (
+        "market_route_trace "
+        f"chat_id={chat_id} "
+        f"requested={resolution.requested_market_type} "
+        f"normalized={resolution.normalized_market_type} "
+        f"policy={policy} "
+        f"enabled={enabled} "
+        f"skipped={skipped}"
+    )
 
 
 @dataclass(slots=True)
@@ -488,17 +499,8 @@ async def _run_rsi_mode(
     filters: SignalFilterEngine,
     shard_index: int,
     shard_count: int,
+    market_router: MarketProviderRouter,
 ) -> int:
-    try:
-        universe = await fetch_top_symbols_by_volume(
-            quote_asset=settings.bingx_quote_asset,
-            top_n=settings.feed_universe_size,
-            min_quote_volume_24h=settings.bingx_min_quote_volume,
-        )
-    except (BinanceUniverseError, Exception):
-        log.exception("Failed to load universe in RSI mode")
-        return 0
-
     try:
         chat_ids = await _list_signal_chats(client)
     except Exception:
@@ -510,20 +512,8 @@ async def _run_rsi_mode(
         log.info("RSI mode: no target chats registered yet")
         return 0
 
-    if not universe.symbols:
-        log.warning("RSI mode: empty symbols list")
-        return 0
-
-    shard_symbols = _select_shard_symbols(
-        universe.symbols,
-        shard_index=shard_index,
-        shard_count=shard_count,
-    )
-    if not shard_symbols:
-        log.info("RSI mode: shard has no symbols (index=%s count=%s)", shard_index, shard_count)
-        return 0
-    volume_map = universe.volume_map
-    log.info("RSI shard %d: %d symbols to scan", shard_index, len(shard_symbols))
+    route_scan_cache: dict[str, tuple[list[str], dict[str, float]]] = {}
+    max_assigned_symbols = 0
 
     for chat_id in chat_ids:
         try:
@@ -562,33 +552,73 @@ async def _run_rsi_mode(
             max(trigger_5m, trigger_15m),
             trigger_mode,
         )
-        market_types = _resolve_market_types(str(effective.get("market_type", "both")))
-        if not settings.signal_enable_futures_adapter:
-            has_futures = "futures" in market_types
-            market_types = [m for m in market_types if m != "futures"]
-            if has_futures:
-                log.info(
-                    "RSI mode: futures excluded from scan loop because adapter is disabled, chat_id=%s",
-                    chat_id,
+        requested_market_type = str(effective.get("market_type", "both"))
+        resolution = market_router.resolve(requested_market_type)
+        if settings.signal_market_route_trace_enabled:
+            log.info(
+                _format_market_route_trace(
+                    market_router,
+                    chat_id=chat_id,
+                    requested_market_type=requested_market_type,
                 )
+            )
+        if resolution.skipped_routes:
+            for skipped in resolution.skipped_routes:
                 await _debug_scan_event(
                     client,
                     chat_id=chat_id,
                     symbol="-",
                     timeframe="-",
-                    market_type="futures",
+                    market_type=skipped.market_type,
                     mode="system",
-                    event="futures_excluded_adapter_disabled",
-                    details={"chat_id": chat_id},
+                    event=f"{skipped.market_type}_route_skipped",
+                    details={"reason": skipped.reason or "unknown"},
                 )
-        if not market_types:
+        if not resolution.enabled_routes:
             continue
         feed_mode_enabled = bool(effective.get("feed_mode_enabled", True))
         strategy_mode_enabled = bool(effective.get("strategy_mode_enabled", True))
         rsi_enabled = bool(effective.get("rsi_enabled", True))
         sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
-        for market_type in market_types:
+        for route in resolution.enabled_routes:
+            market_type = route.market_type
+            provider = market_router.get_provider(route)
+            if market_type not in route_scan_cache:
+                try:
+                    route_universe = await provider.fetch_universe(
+                        quote_asset=settings.bingx_quote_asset,
+                        top_n=settings.feed_universe_size,
+                        min_quote_volume_24h=settings.bingx_min_quote_volume,
+                    )
+                except (BinanceUniverseError, Exception):
+                    log.exception(
+                        "Failed to load universe in RSI mode route=%s provider=%s",
+                        market_type,
+                        route.provider_name,
+                    )
+                    route_scan_cache[market_type] = ([], {})
+                else:
+                    route_shard_symbols = _select_shard_symbols(
+                        route_universe.symbols,
+                        shard_index=shard_index,
+                        shard_count=shard_count,
+                    )
+                    route_scan_cache[market_type] = (
+                        route_shard_symbols,
+                        route_universe.volume_map,
+                    )
+                    log.info(
+                        "RSI shard %d route=%s provider=%s: %d symbols to scan",
+                        shard_index,
+                        market_type,
+                        route.provider_name,
+                        len(route_shard_symbols),
+                    )
+            shard_symbols, volume_map = route_scan_cache.get(market_type, ([], {}))
+            if not shard_symbols:
+                continue
+            max_assigned_symbols = max(max_assigned_symbols, len(shard_symbols))
             for selected_tf in active_timeframes:
                 (
                     evaluation_tf,
@@ -616,7 +646,7 @@ async def _run_rsi_mode(
                     if sent_in_cycle >= max_signals_per_cycle:
                         break
                     try:
-                        snapshot = await build_snapshot(
+                        snapshot = await provider.build_snapshot(
                             symbol=symbol,
                             timeframe=evaluation_tf,
                             volume_avg_window=settings.signal_volume_avg_window,
@@ -638,7 +668,7 @@ async def _run_rsi_mode(
                         live_change_pct: float | None = None
                         try:
                             if trigger_mode in {"live_spike", "both"}:
-                                prefetched_live_price = await fetch_live_price(
+                                prefetched_live_price = await provider.fetch_live_price(
                                     symbol=symbol,
                                     cache_ttl_seconds=settings.signal_live_price_cache_ttl_seconds,
                                 )
@@ -793,7 +823,7 @@ async def _run_rsi_mode(
                                     live_price: float | None = prefetched_live_price
                                     if settings.signal_live_price_enabled and live_price is None:
                                         try:
-                                            live_price = await fetch_live_price(
+                                            live_price = await provider.fetch_live_price(
                                                 symbol=candidate.symbol,
                                                 cache_ttl_seconds=settings.signal_live_price_cache_ttl_seconds,
                                             )
@@ -831,7 +861,7 @@ async def _run_rsi_mode(
                                         await bot.send_message(
                                             chat_id,
                                             format_signal_card(candidate, live_price=live_price),
-                                            reply_markup=panel_actions_kb(),
+                                            reply_markup=bottom_chat_menu_kb(),
                                         )
                                         effective_threshold = (
                                             trigger_5m if evaluation_tf == "5m" else trigger_15m
@@ -890,7 +920,7 @@ async def _run_rsi_mode(
 
                     if strategy_mode_enabled and sent_in_cycle < max_signals_per_cycle:
                         try:
-                            bars = await fetch_recent_bars(
+                            bars = await provider.fetch_recent_bars(
                                 symbol=symbol,
                                 timeframe=selected_tf,
                                 limit=120,
@@ -976,7 +1006,7 @@ async def _run_rsi_mode(
                             await bot.send_message(
                                 chat_id,
                                 format_strategy_signal_card(strategy_candidate),
-                                reply_markup=panel_actions_kb(),
+                                reply_markup=bottom_chat_menu_kb(),
                             )
                             sent_in_cycle += 1
                             await _debug_scan_event(
@@ -1007,7 +1037,7 @@ async def _run_rsi_mode(
                                 chat_id,
                             )
 
-    return len(shard_symbols)
+    return max_assigned_symbols
 
 
 async def main() -> None:
@@ -1034,6 +1064,9 @@ async def main() -> None:
         memory_state_ttl_seconds=settings.signal_filter_memory_state_ttl_seconds,
         memory_state_max_keys=settings.signal_filter_memory_state_max_keys,
         memory_gc_interval_seconds=settings.signal_filter_memory_gc_interval_seconds,
+    )
+    market_router = MarketProviderRouter(
+        futures_adapter_enabled=settings.signal_enable_futures_adapter,
     )
     shard_count = max(1, settings.worker_shard_count)
     shard_index = _resolve_shard_index(shard_count)
@@ -1247,6 +1280,7 @@ async def main() -> None:
                         filters,
                         shard_index,
                         shard_count,
+                        market_router,
                     )
                 else:
                     assigned_symbols_count_last = -1

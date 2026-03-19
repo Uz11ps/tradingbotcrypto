@@ -1,5 +1,55 @@
 # signalog
 
+## 19.03 02:05 - PR9 / Этап C (статистика + короткая история)
+
+### Что добавлено
+- Новый bounded endpoint: `GET /stats/short-history`
+  - окно по времени ограничено (`window_hours`);
+  - количество строк ограничено (`limit`);
+  - summary по сигналам (`total/up/down`, `market_type_counts`);
+  - краткий reject-срез (`rejects_total`, `reject_reasons_top`);
+  - короткий список `recent_signals`.
+- Ограничители вынесены в конфиг:
+  - `SIGNAL_STATS_SHORT_WINDOW_HOURS`
+  - `SIGNAL_STATS_SHORT_MAX_ROWS`
+
+### Что проверить
+- endpoint отдает только bounded-данные;
+- без бесконечного накопления ответа при больших таблицах;
+- показатели reject/signal пригодны для короткого аудита качества.
+
+## 19.03 01:35 - PR9 / Этап B + PR8.1
+
+### Что закрыто
+- Futures-путь переведен на отдельный data source:
+  - отдельные futures URLs для klines/ticker;
+  - route reason теперь `futures_route_live_source`;
+  - universe подгружается по route (`spot` и `futures` раздельно).
+- UX hotfix:
+  - убраны inline-кнопки под каждым сигналом;
+  - добавлена одна постоянная нижняя кнопка `⬅️ Главное меню`.
+
+### Что проверить в проде
+- `market_route_trace` показывает `futures:bingx_futures` в режиме `both`.
+- В логах есть futures fetch labels (`bingx ... futures ...`).
+- В Telegram под сигналами нет inline-кнопок, внизу одна кнопка меню.
+
+## 19.03 00:55 - PR9 / Этап A (market provider abstraction)
+
+### Что добавлено
+- Формализована policy маршрутизации market type через router:
+  - `spot` -> всегда активный route;
+  - `futures` -> только через adapter policy;
+  - `both` -> детерминированное разложение на route-список.
+- В воркере включен явный route trace лог:
+  - `market_route_trace chat_id=... requested=... normalized=... policy=... enabled=... skipped=...`
+- Route-решения вынесены из scan-loop в abstraction, чтобы не разрастался inline `if/else`.
+
+### Что проверяем в проде
+- В логах есть `market_route_trace` для активных чатов.
+- При `SIGNAL_ENABLE_FUTURES_ADAPTER=false` есть явные `futures_route_skipped`.
+- Universe/candle path продолжает работать без деградации latency/error.
+
 ## 17.03 22:04 — Аудит сигналов (новая логика)
 
 ### Наблюдения

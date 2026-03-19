@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 DEFAULT_TIMEFRAMES: list[str] = ["5m", "15m", "1h", "4h"]
 
@@ -81,6 +81,15 @@ def feed_kb(mode: str) -> InlineKeyboardMarkup:
 
 def panel_actions_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=_persistent_bottom_rows())
+
+
+def bottom_chat_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⬅️ Главное меню")]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Нажмите «Главное меню»",
+    )
 
 
 def signal_side_kb(current_mode: str) -> InlineKeyboardMarkup:

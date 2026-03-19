@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from app.core.config import settings
+
 BINGX_SYMBOLS_URL = "https://open-api.bingx.com/openApi/spot/v1/common/symbols"
 BINGX_TICKER_24H_URL = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
 LEVERAGED_SUFFIXES = ("UP-USDT", "DOWN-USDT", "BULL-USDT", "BEAR-USDT")
@@ -16,6 +18,13 @@ log = logging.getLogger(__name__)
 
 class BinanceUniverseError(RuntimeError):
     pass
+
+
+def _resolve_ticker_url(market_type: str) -> str:
+    normalized = (market_type or "spot").strip().lower()
+    if normalized == "futures":
+        return settings.bingx_futures_ticker_url
+    return BINGX_TICKER_24H_URL
 
 
 @dataclass(slots=True)
@@ -79,15 +88,17 @@ async def fetch_top_symbols_by_volume(
     quote_asset: str = "USDT",
     top_n: int = 300,
     min_quote_volume_24h: float = 500_000.0,
+    market_type: str = "spot",
 ) -> UniverseSnapshot:
     """One ticker call -> top-N pairs by 24h quoteVolume.
 
     Returns both the ranked symbol list and volume map (reusable by workers).
     """
     try:
+        ticker_url = _resolve_ticker_url(market_type)
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(
-                BINGX_TICKER_24H_URL,
+                ticker_url,
                 params={"timestamp": int(time.time() * 1000)},
             )
             response.raise_for_status()
@@ -118,7 +129,8 @@ async def fetch_top_symbols_by_volume(
     symbols = [s for s, _ in selected]
     volume_map = {s: v for s, v in selected}
     log.info(
-        "Universe: %d pairs above $%.0f vol, selected top %d",
+        "Universe (%s): %d pairs above $%.0f vol, selected top %d",
+        market_type,
         len(ranked),
         min_quote_volume_24h,
         len(symbols),

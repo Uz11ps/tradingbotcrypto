@@ -89,6 +89,37 @@ class PerformanceStatsOut(BaseModel):
     profit_factor: float
 
 
+class RejectReasonStatOut(BaseModel):
+    reason: str
+    count: int
+
+
+class ShortSignalOut(BaseModel):
+    id: int
+    created_at: datetime
+    symbol: str
+    timeframe: str
+    direction: str
+    signal_type: str | None = None
+    market_type: str | None = None
+    trigger_source: str | None = None
+    price: float | None = None
+    reason: str | None = None
+
+
+class StatsShortHistoryOut(BaseModel):
+    generated_at: datetime
+    window_hours: int
+    limit: int
+    total_signals: int
+    up_signals: int
+    down_signals: int
+    market_type_counts: dict[str, int]
+    rejects_total: int
+    reject_reasons_top: list[RejectReasonStatOut]
+    recent_signals: list[ShortSignalOut]
+
+
 class NewsItemOut(BaseModel):
     source: str
     title: str

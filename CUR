@@ -1,6 +1,223 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-19 02:30:00] Pre-deploy checkpoint: PR9 (A+B+C) + PR8.1
+**Текущий статус перед выкатом:**
+- Локальный прогон тестов: `python -m pytest -q` -> `40 passed`.
+- В рабочем дереве готовы изменения PR9 A/B/C и UX hotfix PR8.1.
+
+**Команды выкатки на сервер (операционный чеклист):**
+1. Локально:
+   - `git status --short`
+   - `git add CUR signallog.md app/core/config.py app/services/market_provider.py app/services/binance_universe.py app/services/binance_candles.py app/workers/mock_signal_worker.py app/bot/keyboards.py app/bot/handlers.py app/api/schemas.py app/api/router.py tests/test_market_provider_policy.py tests/test_stats_short_history_bounds.py tests/test_binance_candles_snapshot.py`
+   - `git commit -m "Add live futures routing, bounded short-history stats, and bottom chat menu UX."`
+   - `git push origin main`
+2. На сервере:
+   - `cd /opt/tradingbotcrypto`
+   - `git pull --ff-only origin main`
+   - `docker compose --profile worker up -d --build --remove-orphans --scale signal_worker=5`
+
+**Пост-деплой валидация (обязательная):**
+- Futures route:
+  - `docker compose logs --since=20m signal_worker | grep "market_route_trace"`
+  - `docker compose logs --since=20m signal_worker | grep "Universe (futures)"`
+  - `docker compose logs --since=20m signal_worker | grep -E "bingx (bars|klines|live ticker) futures"`
+- Короткая статистика:
+  - `curl -s "http://127.0.0.1:8000/stats/short-history?hours=72&limit=100" | jq .`
+- UX:
+  - в Telegram под новыми сигналами нет inline-кнопок;
+  - внизу чата есть одна reply-кнопка `⬅️ Главное меню`.
+
+**Как понять, сколько монет реально обрабатывает воркер сейчас:**
+- Основной лог:
+  - `docker compose logs --since=20m signal_worker | grep "RSI shard .* route="`
+  - формат: `RSI shard <idx> route=<spot|futures> provider=<...>: <N> symbols to scan`
+- Быстрые агрегаты:
+  - `docker compose logs --since=20m signal_worker | grep "RSI shard .* route=" | awk '{print $5,$6,$8,$9,$10,$11,$12}'`
+  - `docker compose logs --since=20m signal_worker | grep "RSI shard .* route=" | sort | uniq -c`
+- Интерпретация:
+  - `N` в строке = symbols per shard per route;
+  - при `market_type=both` суммарная нагрузка воркера ~= `N_spot + N_futures` (до умножения на число chat/timeframe).
+
+---
+## [2026-03-19 02:05:00] Реализовано: PR9 / Этап C (bounded статистика + короткая история)
+**Что сделано:**
+- Добавлен bounded API-срез короткой истории сигналов:
+  - `GET /stats/short-history`
+  - поля:
+    - bounded window (`window_hours`)
+    - bounded rows (`limit`)
+    - totals (`total_signals`, `up_signals`, `down_signals`)
+    - `market_type_counts`
+    - `rejects_total`, `reject_reasons_top`
+    - `recent_signals` (короткий список последних сигналов).
+- Добавлены response-схемы:
+  - `StatsShortHistoryOut`
+  - `ShortSignalOut`
+  - `RejectReasonStatOut`
+  в `app/api/schemas.py`.
+- Добавлен helper ограничений `_bounded_positive_int(...)` в `app/api/router.py`.
+- Добавлены конфиги bounded-режима:
+  - `SIGNAL_STATS_SHORT_WINDOW_HOURS=72`
+  - `SIGNAL_STATS_SHORT_MAX_ROWS=200`
+  в `app/core/config.py`.
+- Добавлен unit-тест:
+  - `tests/test_stats_short_history_bounds.py`.
+
+**Что не менялось:**
+- Основной signal pipeline и формат отправки сигналов.
+- Retention scheduler/cleanup semantics.
+
+**Проверки:**
+- `python -m pytest -q tests/test_stats_short_history_bounds.py tests/test_market_provider_policy.py tests/test_binance_candles_snapshot.py` -> `6 passed`.
+- `python -m pytest -q` -> `40 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Прод-проверка futures-route (что выполнить на сервере):**
+- `docker compose logs --since=20m signal_worker | grep "market_route_trace"`
+  - ожидаем для `both`: `enabled=spot:bingx_spot,futures:bingx_futures`.
+- `docker compose logs --since=20m signal_worker | grep "Universe (futures)"`
+  - подтверждение, что futures universe реально подгружается отдельным route.
+- `docker compose logs --since=20m signal_worker | grep -E "bingx (bars|klines|live ticker) futures"`
+  - подтверждение futures data fetch path.
+
+**Ограничение текущей сессии:**
+- Локально проверить прод-логи не удалось (в среде отсутствует доступ к docker engine/серверу), поэтому runtime-верификация вынесена в команды выше.
+
+---
+## [2026-03-19 01:35:00] Реализовано: PR9 / Этап B + PR8.1 (реальный futures source + одна нижняя кнопка)
+**Что сделано (PR9 / Этап B):**
+- Подключен отдельный futures market data source (не spot-adapter):
+  - `app/services/binance_candles.py`:
+    - добавлен resolver market URLs по `market_type`;
+    - для `futures` используются отдельные endpoints из настроек:
+      - `BINGX_FUTURES_KLINES_URL`
+      - `BINGX_FUTURES_TICKER_URL`;
+  - `app/services/binance_universe.py`:
+    - universe ticker URL выбирается по `market_type` (spot/futures);
+  - `app/services/market_provider.py`:
+    - futures provider переименован в `bingx_futures`;
+    - route reason обновлен на `futures_route_live_source`.
+- `app/core/config.py`:
+  - добавлены параметры futures endpoint-ов:
+    - `bingx_futures_klines_url`
+    - `bingx_futures_ticker_url`.
+- `app/workers/mock_signal_worker.py`:
+  - scan теперь route-aware не только по snapshot/build, но и по universe:
+    - для каждого `market_type` подгружается отдельный universe через provider;
+    - добавлен route-cache в цикл, чтобы не делать лишние вызовы по chat.
+
+**Что сделано (PR8.1 UX hotfix):**
+- Убрана inline-панель из потоковых сигналов (feed + strategy).
+- Добавлена одна постоянная нижняя кнопка чата (Reply keyboard):
+  - `app/bot/keyboards.py`: `bottom_chat_menu_kb()` с `⬅️ Главное меню`;
+  - `app/bot/handlers.py`:
+    - на `/start` активируется нижняя кнопка;
+    - добавлен handler текста `⬅️ Главное меню` -> home.
+
+**Проверки:**
+- `python -m pytest -q tests/test_market_provider_policy.py tests/test_binance_candles_snapshot.py tests/test_worker_timeframe_fallback.py` -> `7 passed`.
+- `python -m pytest -q` -> `38 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Команды runtime-подтверждения (после деплоя):**
+- `docker compose logs --since=15m signal_worker | grep "market_route_trace"`
+  - ожидаем route policy с `enabled=spot:bingx_spot,futures:bingx_futures` для режима `both`.
+- `docker compose logs --since=15m signal_worker | grep "Universe (futures)"`
+  - подтверждаем отдельный futures universe path.
+- `docker compose logs --since=15m signal_worker | grep -E "bingx (bars|klines|live ticker) futures"`
+  - подтверждаем futures route в data fetch labels.
+- UX проверка в Telegram:
+  - на сигнале нет inline кнопок;
+  - внизу чата есть одна постоянная кнопка `⬅️ Главное меню`.
+
+**Что остается по roadmap:**
+- PR9 / Этап A runtime gate в проде (подтвердить policy logs на текущем деплое).
+- PR9 / Этап C: bounded статистика + короткая история (`TTL + last N + audit API`).
+
+---
+## [2026-03-19 00:35:00] Планируемые правки: PR9 / Этап A (market provider abstraction + policy both + route trace)
+**1) Список изменяемых файлов:**
+- `CUR`
+- `signallog.md`
+- `app/workers/mock_signal_worker.py`
+- `app/core/config.py`
+- `app/services/binance_universe.py`
+- `app/services/binance_candles.py`
+- `app/services/market_provider.py` (новый)
+- `tests/test_market_provider_policy.py` (новый)
+
+**2) Точная цель:**
+- Вынести routing `spot/futures` из worker-цикла в отдельный provider abstraction, чтобы избежать разрастания if/else.
+- Формализовать policy `both`:
+  - `spot` всегда активен;
+  - `futures` идет через адаптер только при `SIGNAL_ENABLE_FUTURES_ADAPTER=true`;
+  - при выключенном адаптере futures route явно пропускается.
+- Добавить явный `market_route_trace` лог для прод-проверки маршрута данных по каждому `chat_id`.
+
+**3) Что не меняется:**
+- Текущие market/universe источники (BingX spot) и API-контракты.
+- Бизнес-логика RSI/strategy фильтров.
+- Шардирование/lease/fail-open поведение.
+
+**4) Риски:**
+- Потенциальный рост лог-объема из-за route-trace.
+- Риск регрессии worker import-path при переходе на provider abstraction.
+
+**5) Тесты:**
+- Unit-тесты policy/route:
+  - `pytest -q tests/test_market_provider_policy.py`
+- Полный регресс:
+  - `pytest -q`
+
+**6) Rollback-план:**
+- Вернуть worker к прямым вызовам `binance_*` сервисов.
+- Удалить provider router + route trace конфиг/логи.
+
+---
+## [2026-03-19 00:55:00] Реализовано: PR9 / Этап A (market provider abstraction + policy both + route trace)
+**Что сделано:**
+- Добавлен новый слой `app/services/market_provider.py`:
+  - `MarketProviderRouter` для формализации route-policy;
+  - `MarketPolicyResolution` / `ResolvedMarketRoute`;
+  - `SpotMarketProvider`;
+  - `SpotBackedFuturesMarketProvider` (compatibility adapter).
+- `app/workers/mock_signal_worker.py`:
+  - RSI-цикл переведен на provider abstraction (`fetch_universe`, `build_snapshot`, `fetch_recent_bars`, `fetch_live_price`);
+  - добавлен структурный лог `market_route_trace` с полями:
+    - `chat_id`, `requested`, `normalized`, `policy`, `enabled`, `skipped`;
+  - исключение futures при выключенном адаптере формализовано через router policy (без inline-фильтра в scan loop).
+- `app/core/config.py`:
+  - добавлен флаг `signal_market_route_trace_enabled=True`.
+- `app/services/binance_universe.py`:
+  - `fetch_top_symbols_by_volume(..., market_type="spot")`;
+  - лог universe расширен меткой market route.
+- `app/services/binance_candles.py`:
+  - добавлен необязательный `market_type="spot"` в ключевые fetch/build функции;
+  - retry labels теперь включают route context.
+- Добавлены unit-тесты `tests/test_market_provider_policy.py`:
+  - policy для `both` при включенном/выключенном futures adapter;
+  - формат `market_route_trace`.
+
+**Что не менялось:**
+- Источники market data и universe остались spot-backed.
+- Контракты API/БД не менялись.
+- Логика detection/threshold/fallback не менялась.
+
+**Команды runtime-валидации (после деплоя):**
+- `docker compose logs --since=15m signal_worker | grep "market_route_trace"`
+  - ожидаем `requested/normalized/policy/enabled/skipped` по каждому активному chat.
+- `docker compose logs --since=15m signal_worker | grep "futures_route_skipped"`
+  - при `SIGNAL_ENABLE_FUTURES_ADAPTER=false` должны быть явные skip-события futures.
+- `docker compose logs --since=15m signal_worker | grep "Universe ("`
+  - видим route-tag в universe логах.
+
+**Критерии успеха:**
+- В логах есть `market_route_trace` без пропусков для активных чатов.
+- Для режима `both` policy детерминирована и прозрачно объяснима логами.
+- Worker продолжает стабильный scan loop без runtime-исключений по provider routing.
+
+---
 ## [2026-03-18 21:15:00] Реализовано: PR8 (D1+D2) — UX навигация и упрощенный старт
 **Что сделано:**
 - `app/workers/mock_signal_worker.py`:

@@ -53,10 +53,22 @@ def _make_bars(*, descending: bool) -> list[KlineBar]:
 
 @pytest.mark.asyncio
 async def test_build_snapshot_same_for_ascending_and_descending(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fetch_bars_asc(*, symbol: str, timeframe: str, limit: int = 120) -> list[KlineBar]:
+    async def _fetch_bars_asc(
+        *,
+        symbol: str,
+        timeframe: str,
+        limit: int = 120,
+        market_type: str = "spot",
+    ) -> list[KlineBar]:
         return _make_bars(descending=False)
 
-    async def _fetch_bars_desc(*, symbol: str, timeframe: str, limit: int = 120) -> list[KlineBar]:
+    async def _fetch_bars_desc(
+        *,
+        symbol: str,
+        timeframe: str,
+        limit: int = 120,
+        market_type: str = "spot",
+    ) -> list[KlineBar]:
         return _make_bars(descending=True)
 
     monkeypatch.setattr(binance_candles, "fetch_recent_bars", _fetch_bars_asc)

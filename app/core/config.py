@@ -36,6 +36,8 @@ class Settings(BaseSettings):
 
     bingx_quote_asset: str = "USDT"
     bingx_min_quote_volume: float = 1000000.0
+    bingx_futures_klines_url: str = "https://open-api.bingx.com/openApi/swap/v2/quote/klines"
+    bingx_futures_ticker_url: str = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
     signal_dedup_window_seconds: int = 900
     signal_min_abs_change_pct: float = 1.5
     signal_volume_spike_multiplier: float = 2.0
@@ -60,11 +62,14 @@ class Settings(BaseSettings):
     signal_filter_memory_gc_interval_seconds: int = 60
     signal_retention_days: int = 3
     signal_retention_prune_interval_seconds: int = 1800
+    signal_stats_short_window_hours: int = 72
+    signal_stats_short_max_rows: int = 200
     signal_debug_full_enabled: bool = False
     signal_debug_reject_sample_rate: float = 0.2
     signal_debug_log_limit_per_cycle: int = 500
     signal_disable_double_min_move_filter: bool = True
     signal_enable_futures_adapter: bool = False
+    signal_market_route_trace_enabled: bool = True
     signal_live_price_enabled: bool = True
     signal_live_price_cache_ttl_seconds: float = 1.5
     signal_live_detector_enabled: bool = False

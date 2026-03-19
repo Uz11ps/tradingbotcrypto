@@ -19,13 +19,16 @@ from app.api.schemas import (
     RawCandidateIn,
     ScanLogIn,
     SignalCreate,
+    ShortSignalOut,
     SignalOut,
+    StatsShortHistoryOut,
     StatsOverviewOut,
     SubscriptionCreate,
     SubscriptionDelete,
     SubscriptionOut,
     UserSignalSettingsOut,
     UserSignalSettingsUpdate,
+    RejectReasonStatOut,
 )
 from app.core.config import settings
 from app.db.models import (
@@ -70,6 +73,12 @@ def _fit_varchar(value: str | None, max_len: int) -> str | None:
         return None
     text = value.strip()
     return text[:max_len] if len(text) > max_len else text
+
+
+def _bounded_positive_int(value: int | None, *, default: int, upper: int) -> int:
+    if value is None:
+        return max(1, min(default, upper))
+    return max(1, min(int(value), upper))
 
 
 @router.get("/health")
@@ -477,6 +486,118 @@ async def stats_overview(session: AsyncSession = Depends(get_session)) -> StatsO
     down = int((await session.execute(down_stmt)).scalar_one() or 0)
 
     return StatsOverviewOut(total_signals=total, up_signals=up, down_signals=down)
+
+
+@router.get("/stats/short-history", response_model=StatsShortHistoryOut)
+async def stats_short_history(
+    hours: int | None = None,
+    limit: int | None = None,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    chat_id: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> StatsShortHistoryOut:
+    max_window = max(1, int(settings.signal_stats_short_window_hours))
+    max_rows = max(1, int(settings.signal_stats_short_max_rows))
+    bounded_window_hours = _bounded_positive_int(hours, default=max_window, upper=max_window)
+    bounded_limit = _bounded_positive_int(limit, default=max_rows, upper=max_rows)
+    cutoff = datetime.now(tz=UTC) - timedelta(hours=bounded_window_hours)
+
+    signal_filters = [Signal.created_at >= cutoff]
+    if symbol:
+        signal_filters.append(Signal.symbol == symbol)
+    if timeframe:
+        signal_filters.append(Signal.timeframe == timeframe)
+
+    total_stmt = select(func.count(Signal.id)).where(*signal_filters)
+    up_stmt = select(func.count(Signal.id)).where(
+        *signal_filters,
+        Signal.direction == SignalDirection.up,
+    )
+    down_stmt = select(func.count(Signal.id)).where(
+        *signal_filters,
+        Signal.direction == SignalDirection.down,
+    )
+    total_signals = int((await session.execute(total_stmt)).scalar_one() or 0)
+    up_signals = int((await session.execute(up_stmt)).scalar_one() or 0)
+    down_signals = int((await session.execute(down_stmt)).scalar_one() or 0)
+
+    market_type_counts: dict[str, int] = {}
+    market_stmt = (
+        select(Signal.market_type, func.count(Signal.id))
+        .where(*signal_filters)
+        .group_by(Signal.market_type)
+    )
+    market_rows = (await session.execute(market_stmt)).all()
+    for market_type_value, count in market_rows:
+        key = str(market_type_value or "unknown")
+        market_type_counts[key] = int(count or 0)
+
+    recent_stmt = (
+        select(Signal)
+        .where(*signal_filters)
+        .order_by(desc(Signal.created_at))
+        .limit(bounded_limit)
+    )
+    recent_rows = (await session.execute(recent_stmt)).scalars().all()
+    recent_signals = [
+        ShortSignalOut(
+            id=s.id,
+            created_at=s.created_at,
+            symbol=s.symbol,
+            timeframe=s.timeframe,
+            direction=s.direction.value,
+            signal_type=s.signal_type,
+            market_type=s.market_type,
+            trigger_source=s.trigger_source,
+            price=s.price,
+            reason=s.reason,
+        )
+        for s in recent_rows
+    ]
+
+    reject_filters = [
+        RawCandidate.created_at >= cutoff,
+        RawCandidate.decision == "reject",
+    ]
+    if symbol:
+        reject_filters.append(RawCandidate.symbol == symbol)
+    if timeframe:
+        reject_filters.append(RawCandidate.timeframe == timeframe)
+    if chat_id is not None:
+        reject_filters.append(RawCandidate.chat_id == chat_id)
+
+    rejects_total_stmt = select(func.count(RawCandidate.id)).where(*reject_filters)
+    rejects_total = int((await session.execute(rejects_total_stmt)).scalar_one() or 0)
+
+    reject_reason_stmt = (
+        select(RawCandidate.reject_reason, func.count(RawCandidate.id))
+        .where(*reject_filters)
+        .group_by(RawCandidate.reject_reason)
+        .order_by(desc(func.count(RawCandidate.id)))
+        .limit(5)
+    )
+    reject_rows = (await session.execute(reject_reason_stmt)).all()
+    reject_reasons_top = [
+        RejectReasonStatOut(
+            reason=str(reason or "unknown"),
+            count=int(count or 0),
+        )
+        for reason, count in reject_rows
+    ]
+
+    return StatsShortHistoryOut(
+        generated_at=datetime.now(tz=UTC),
+        window_hours=bounded_window_hours,
+        limit=bounded_limit,
+        total_signals=total_signals,
+        up_signals=up_signals,
+        down_signals=down_signals,
+        market_type_counts=market_type_counts,
+        rejects_total=rejects_total,
+        reject_reasons_top=reject_reasons_top,
+        recent_signals=recent_signals,
+    )
 
 
 @router.get("/stats/performance", response_model=PerformanceStatsOut)

@@ -7,10 +7,10 @@ from aiogram.types import CallbackQuery, Message
 
 from app.bot.api_client import ApiClient
 from app.bot.keyboards import (
+    bottom_chat_menu_kb,
     feed_kb,
     main_menu_kb,
     market_type_kb,
-    panel_actions_kb,
     reset_confirm_kb,
     rsi_settings_kb,
     signal_modes_kb,
@@ -110,6 +110,13 @@ async def start(m: Message, state: FSMContext, api: ApiClient) -> None:
     await state.set_state(UserFlow.main)
     # Register this chat for push stream delivery.
     await api.update_user_settings(chat_id=m.chat.id)
+    await _render_home(m, api)
+    await m.answer("Нижняя кнопка меню активна.", reply_markup=bottom_chat_menu_kb())
+
+
+@router.message(F.text == "⬅️ Главное меню")
+async def bottom_menu_home(m: Message, state: FSMContext, api: ApiClient) -> None:
+    await state.set_state(UserFlow.main)
     await _render_home(m, api)
 
 
@@ -211,7 +218,6 @@ async def settings_trigger(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.entering_min_price_move)
     await c.message.edit_text(
         "Введите минимальное движение в %.\n\nПримеры:\n5\n10\n15",
-        reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
@@ -230,7 +236,7 @@ async def handle_min_price_move(m: Message, state: FSMContext, api: ApiClient) -
     await api.update_user_settings(chat_id=m.chat.id, min_price_move_pct=min_move)
     await m.answer(
         f"Триггер цены обновлён: {min_move:.1f}%",
-        reply_markup=main_menu_kb(),
+        reply_markup=bottom_chat_menu_kb(),
     )
 
 
@@ -269,7 +275,6 @@ async def rsi_upper(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.entering_rsi_upper)
     await c.message.edit_text(
         "Введите RSI для pump (обычно 60-70)\nПример: 60",
-        reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
@@ -288,7 +293,7 @@ async def handle_rsi_upper(m: Message, state: FSMContext, api: ApiClient) -> Non
     await state.set_state(UserFlow.main)
     await m.answer(
         f"RSI pump обновлён: ≥ {value:.0f}",
-        reply_markup=main_menu_kb(),
+        reply_markup=bottom_chat_menu_kb(),
     )
 
 
@@ -297,7 +302,6 @@ async def rsi_lower(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.entering_rsi_lower)
     await c.message.edit_text(
         "Введите RSI для dump (обычно 30-40)\nПример: 40",
-        reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
@@ -316,7 +320,7 @@ async def handle_rsi_lower(m: Message, state: FSMContext, api: ApiClient) -> Non
     await state.set_state(UserFlow.main)
     await m.answer(
         f"RSI dump обновлён: ≤ {value:.0f}",
-        reply_markup=main_menu_kb(),
+        reply_markup=bottom_chat_menu_kb(),
     )
 
 
@@ -325,7 +329,6 @@ async def settings_volume(c: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserFlow.entering_min_volume)
     await c.message.edit_text(
         "Введите минимальный объём 24h (можно K/M)\nПримеры:\n500K\n2M\n1000000",
-        reply_markup=panel_actions_kb(),
     )
     await c.answer()
 
@@ -353,7 +356,7 @@ async def handle_volume(m: Message, state: FSMContext, api: ApiClient) -> None:
         return
     await api.update_user_settings(chat_id=m.chat.id, min_quote_volume=val)
     await state.set_state(UserFlow.main)
-    await m.answer(f"Мин. объём обновлён: ≥ ${val:,.0f}", reply_markup=main_menu_kb())
+    await m.answer(f"Мин. объём обновлён: ≥ ${val:,.0f}", reply_markup=bottom_chat_menu_kb())
 
 
 @router.callback_query(F.data == "settings:reset")
@@ -402,7 +405,7 @@ async def menu_info(c: CallbackQuery) -> None:
         "2) Сигналы стратегии (pin bar + отклонение)\n\n"
         "Чтобы получать сигналы чаще, увеличьте число таймфреймов и проверьте тип рынка в настройках."
     )
-    await c.message.edit_text(text, reply_markup=panel_actions_kb())
+    await c.message.edit_text(text, reply_markup=main_menu_kb())
     await c.answer()
 
 

@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from app.core.config import settings
+
 BINGX_KLINES_URL = "https://open-api.bingx.com/openApi/spot/v1/market/kline"
 BINGX_TICKER_24H_URL = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
 TIMEFRAME_MAP: dict[str, str] = {
@@ -33,6 +35,13 @@ _LIVE_PRICE_CACHE_LOCK = asyncio.Lock()
 
 class BinanceCandlesError(RuntimeError):
     pass
+
+
+def _resolve_market_urls(market_type: str) -> tuple[str, str]:
+    normalized = (market_type or "spot").strip().lower()
+    if normalized == "futures":
+        return settings.bingx_futures_klines_url, settings.bingx_futures_ticker_url
+    return BINGX_KLINES_URL, BINGX_TICKER_24H_URL
 
 
 def _to_bingx_symbol(symbol: str) -> str:
@@ -146,16 +155,18 @@ async def fetch_closes_and_volumes(
     symbol: str,
     timeframe: str,
     limit: int = 100,
+    market_type: str = "spot",
 ) -> tuple[list[float], list[float]]:
     interval = TIMEFRAME_MAP.get(timeframe)
     if not interval:
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
+    klines_url, _ = _resolve_market_urls(market_type)
 
     pair = _to_bingx_symbol(symbol)
     response = await _request_with_retry(
-        BINGX_KLINES_URL,
+        klines_url,
         {"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
-        label=f"bingx klines {symbol} {timeframe}",
+        label=f"bingx klines {market_type} {symbol} {timeframe}",
     )
 
     raw_payload: dict[str, Any] = response.json()
@@ -174,17 +185,19 @@ async def fetch_recent_bars(
     symbol: str,
     timeframe: str,
     limit: int = 120,
+    market_type: str = "spot",
 ) -> list[KlineBar]:
     interval = TIMEFRAME_MAP.get(timeframe)
     if not interval:
         raise BinanceCandlesError(f"Unsupported timeframe '{timeframe}'")
     interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
+    klines_url, _ = _resolve_market_urls(market_type)
 
     pair = _to_bingx_symbol(symbol)
     response = await _request_with_retry(
-        BINGX_KLINES_URL,
+        klines_url,
         {"symbol": pair, "interval": interval, "limit": max(30, min(limit, 500))},
-        label=f"bingx bars {symbol} {timeframe}",
+        label=f"bingx bars {market_type} {symbol} {timeframe}",
     )
     raw_payload: dict[str, Any] = response.json()
     if int(raw_payload.get("code", -1)) != 0:
@@ -218,17 +231,29 @@ async def fetch_recent_bars(
     return bars
 
 
-async def fetch_closes(*, symbol: str, timeframe: str, limit: int = 100) -> list[float]:
-    closes, _ = await fetch_closes_and_volumes(symbol=symbol, timeframe=timeframe, limit=limit)
+async def fetch_closes(
+    *,
+    symbol: str,
+    timeframe: str,
+    limit: int = 100,
+    market_type: str = "spot",
+) -> list[float]:
+    closes, _ = await fetch_closes_and_volumes(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+        market_type=market_type,
+    )
     return closes
 
 
-async def fetch_quote_volume_24h(*, symbol: str) -> float:
+async def fetch_quote_volume_24h(*, symbol: str, market_type: str = "spot") -> float:
     pair = _to_bingx_symbol(symbol)
+    _, ticker_url = _resolve_market_urls(market_type)
     response = await _request_with_retry(
-        BINGX_TICKER_24H_URL,
+        ticker_url,
         {"symbol": pair, "timestamp": int(datetime.now(tz=UTC).timestamp() * 1000)},
-        label=f"bingx 24h ticker {symbol}",
+        label=f"bingx 24h ticker {market_type} {symbol}",
     )
     payload: dict[str, Any] = response.json()
     if int(payload.get("code", -1)) != 0:
@@ -239,15 +264,20 @@ async def fetch_quote_volume_24h(*, symbol: str) -> float:
     return float(rows[0].get("quoteVolume", 0.0) or 0.0)
 
 
-async def fetch_quote_volume_24h_map(*, symbols: list[str]) -> dict[str, float]:
+async def fetch_quote_volume_24h_map(
+    *,
+    symbols: list[str],
+    market_type: str = "spot",
+) -> dict[str, float]:
     if not symbols:
         return {}
     normalized = {_to_bingx_symbol(symbol): symbol for symbol in symbols}
+    _, ticker_url = _resolve_market_urls(market_type)
     response = await _request_with_retry(
-        BINGX_TICKER_24H_URL,
+        ticker_url,
         {"timestamp": int(datetime.now(tz=UTC).timestamp() * 1000)},
         timeout=15.0,
-        label="bingx 24h ticker map",
+        label=f"bingx 24h ticker map {market_type}",
     )
     raw_payload: dict[str, Any] = response.json()
     if int(raw_payload.get("code", -1)) != 0:
@@ -265,19 +295,21 @@ async def fetch_live_price(
     *,
     symbol: str,
     cache_ttl_seconds: float = 1.5,
+    market_type: str = "spot",
 ) -> float:
     pair = _to_bingx_symbol(symbol)
     now_ts = datetime.now(tz=UTC).timestamp()
     ttl = max(0.0, cache_ttl_seconds)
+    _, ticker_url = _resolve_market_urls(market_type)
     if ttl > 0:
         cached = _LIVE_PRICE_CACHE.get(pair)
         if cached and (now_ts - cached[0]) <= ttl:
             return cached[1]
 
     response = await _request_with_retry(
-        BINGX_TICKER_24H_URL,
+        ticker_url,
         {"symbol": pair, "timestamp": int(now_ts * 1000)},
-        label=f"bingx live ticker {symbol}",
+        label=f"bingx live ticker {market_type} {symbol}",
     )
     payload: dict[str, Any] = response.json()
     if int(payload.get("code", -1)) != 0:
@@ -309,8 +341,14 @@ async def build_snapshot(
     timeframe: str,
     volume_avg_window: int = 20,
     quote_volume_24h: float | None = None,
+    market_type: str = "spot",
 ) -> CandleSnapshot:
-    bars = await fetch_recent_bars(symbol=symbol, timeframe=timeframe, limit=100)
+    bars = await fetch_recent_bars(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=100,
+        market_type=market_type,
+    )
     bars = _normalize_bar_order(bars, symbol=symbol, timeframe=timeframe)
     interval_ms = TIMEFRAME_TO_MS.get(timeframe, 0)
     now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
@@ -333,7 +371,7 @@ async def build_snapshot(
     if len(closes) < 30 or len(volumes) < 30:
         raise BinanceCandlesError(f"Not enough closed bars for {symbol} {timeframe}")
     if quote_volume_24h is None:
-        quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol)
+        quote_volume_24h = await fetch_quote_volume_24h(symbol=symbol, market_type=market_type)
     prev_close = closes[-2]
     current_close = closes[-1]
     current_volume = volumes[-1]
