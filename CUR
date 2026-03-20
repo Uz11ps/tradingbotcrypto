@@ -1,6 +1,51 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-20 08:10:00] Реализовано: PR9/F hotfix (settings version trace + short-history contract + strategy hard cooldown)
+**Контекст (по прод-диагностике):**
+- В проде повторялись вопросы "подхватил ли worker новые настройки" (TF/порог/market_type) без однозначного runtime-индикатора.
+- `/stats/short-history` использовался с `window_hours`, но endpoint принимал только `hours`; это визуально давало "неверное окно" и путаницу `total_signals` vs `recent_signals`.
+- По strategy-потоку фиксировались каскады повторов по одному символу (пример: `CRK/USDT`), несмотря на общий фильтр.
+
+**Что изменено:**
+- `app/workers/mock_signal_worker.py`:
+  - в `settings_trace` добавлены явные поля:
+    - `settings_version`
+    - `settings_updated_at`
+  - добавлен hard cooldown для strategy на уровне `chat_id + symbol`:
+    - reject reason: `reject_strategy_symbol_cooldown`
+    - payload: `wait_left_seconds`, `symbol_cooldown_seconds`
+  - после успешной strategy-отправки фиксируется "последняя отправка" по символу.
+- `app/core/config.py`:
+  - новый конфиг `SIGNAL_STRATEGY_SYMBOL_COOLDOWN_SECONDS` (default `1800`).
+- `app/api/router.py`:
+  - добавлен resolver окна short-history с alias:
+    - поддержка и `hours`, и `window_hours` (приоритет у `window_hours`);
+  - расширен контракт `/stats/short-history`:
+    - `window_start_at`, `window_end_at`, `recent_count`;
+  - в `/user-settings` (GET/POST) добавлены:
+    - `settings_updated_at`, `settings_version`.
+- `app/api/schemas.py`:
+  - расширены `StatsShortHistoryOut` и `UserSignalSettingsOut` под новые поля.
+
+**Тесты:**
+- `tests/test_stats_short_history_bounds.py`:
+  - покрыт alias `window_hours` и fallback к `hours`.
+- `tests/test_worker_chat_fairness.py`:
+  - покрыт hard cooldown strategy-symbol (block/expire).
+
+**Связка с EDUCATION (что учтено):**
+- Повышена наблюдаемость runtime-настроек на каждом цикле (`settings_version/settings_updated_at`).
+- Усилен anti-spam для strategy отдельным "жестким" guard, а не только общим cooldown.
+- Контракт статистики сделан явнее: "все сигналы за окно" (`total_signals`) + "сколько реально вернули в ответе" (`recent_count`).
+
+**Операционный шаг под текущее железо (1 vCPU):**
+- До апгрейда CPU фиксируем компромисс:
+  - `docker compose --profile worker up -d --no-deps --scale signal_worker=4 signal_worker`
+- Проверка нагрузки:
+  - `docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"`
+
+---
 ## [2026-03-19 21:20:00] Реализовано: PR9/E hotfix (chat round-robin scheduling)
 **Проблема:**
 - После PR9/D в прод-логах `settings_trace` и `chat_scan_budget_trace` оставались только на одном `chat_id` (`916...`),

@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -262,6 +263,58 @@ def _rotate_chat_ids(chat_ids: list[int], *, cycle_index: int) -> list[int]:
         return []
     start = max(0, int(cycle_index)) % len(chat_ids)
     return chat_ids[start:] + chat_ids[:start]
+
+
+_strategy_symbol_last_sent_ts: dict[tuple[int, str], float] = {}
+_strategy_symbol_gc_ts: float = 0.0
+
+
+def _strategy_symbol_cooldown_reset_for_tests() -> None:
+    global _strategy_symbol_gc_ts
+    _strategy_symbol_last_sent_ts.clear()
+    _strategy_symbol_gc_ts = 0.0
+
+
+def _gc_strategy_symbol_cooldown(*, now_ts: float, cooldown_seconds: int) -> None:
+    global _strategy_symbol_gc_ts
+    gc_interval = max(30, min(cooldown_seconds, 300))
+    if (now_ts - _strategy_symbol_gc_ts) < gc_interval:
+        return
+    _strategy_symbol_gc_ts = now_ts
+    retention = max(cooldown_seconds * 3, 1800)
+    cutoff = now_ts - retention
+    stale = [key for key, ts in _strategy_symbol_last_sent_ts.items() if ts < cutoff]
+    for key in stale:
+        _strategy_symbol_last_sent_ts.pop(key, None)
+
+
+def _strategy_symbol_cooldown_allows(
+    *,
+    chat_id: int,
+    symbol: str,
+    cooldown_seconds: int | None = None,
+    now_ts: float | None = None,
+) -> tuple[bool, int]:
+    effective_cooldown = max(0, int(cooldown_seconds or settings.signal_strategy_symbol_cooldown_seconds))
+    if effective_cooldown <= 0:
+        return True, 0
+    ts = now_ts if now_ts is not None else time.time()
+    _gc_strategy_symbol_cooldown(now_ts=ts, cooldown_seconds=effective_cooldown)
+    key = (int(chat_id), symbol.upper())
+    last_sent = _strategy_symbol_last_sent_ts.get(key, 0.0)
+    elapsed = ts - last_sent
+    wait_left = max(0, int(effective_cooldown - elapsed))
+    return wait_left <= 0, wait_left
+
+
+def _mark_strategy_symbol_sent(
+    *,
+    chat_id: int,
+    symbol: str,
+    now_ts: float | None = None,
+) -> None:
+    ts = now_ts if now_ts is not None else time.time()
+    _strategy_symbol_last_sent_ts[(int(chat_id), symbol.upper())] = ts
 
 
 def _format_market_route_trace(router: MarketProviderRouter, *, chat_id: int, requested_market_type: str) -> str:
@@ -579,10 +632,13 @@ async def _run_rsi_mode(
         trigger_mode = str(settings.signal_trigger_mode).strip().lower() or "candle"
         if trigger_mode not in {"candle", "live_spike", "both"}:
             trigger_mode = "candle"
+        settings_updated_at = str(effective.get("settings_updated_at") or "-")
+        settings_version = int(effective.get("settings_version") or 0)
         log.info(
             (
                 "settings_trace chat_id=%s selected_tf=%s effective_tf=%s "
-                "selected_threshold=%.4f effective_threshold=%.4f trigger_mode=%s"
+                "selected_threshold=%.4f effective_threshold=%.4f trigger_mode=%s "
+                "settings_version=%s settings_updated_at=%s"
             ),
             chat_id,
             ",".join(active_timeframes),
@@ -590,6 +646,8 @@ async def _run_rsi_mode(
             selected_threshold,
             max(trigger_5m, trigger_15m),
             trigger_mode,
+            settings_version,
+            settings_updated_at,
         )
         requested_market_type = str(effective.get("market_type", "both"))
         resolution = market_router.resolve(requested_market_type)
@@ -1032,6 +1090,26 @@ async def _run_rsi_mode(
                                 payload={"details": reject.details if reject else "-"},
                             )
                             continue
+                        hard_allowed, wait_left_seconds = _strategy_symbol_cooldown_allows(
+                            chat_id=chat_id,
+                            symbol=strategy_candidate.symbol,
+                        )
+                        if not hard_allowed:
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
+                                timeframe=strategy_candidate.timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                decision="reject",
+                                reject_reason="reject_strategy_symbol_cooldown",
+                                payload={
+                                    "wait_left_seconds": wait_left_seconds,
+                                    "symbol_cooldown_seconds": settings.signal_strategy_symbol_cooldown_seconds,
+                                },
+                            )
+                            continue
 
                         strategy_direction = "down" if strategy_candidate.direction == "short" else "up"
                         strategy_signal_type = (
@@ -1066,6 +1144,10 @@ async def _run_rsi_mode(
                                 chat_id,
                                 format_strategy_signal_card(strategy_candidate),
                                 reply_markup=bottom_chat_menu_kb(),
+                            )
+                            _mark_strategy_symbol_sent(
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
                             )
                             sent_in_cycle += 1
                             await _debug_scan_event(

@@ -110,8 +110,11 @@ class ShortSignalOut(BaseModel):
 class StatsShortHistoryOut(BaseModel):
     generated_at: datetime
     window_hours: int
+    window_start_at: datetime
+    window_end_at: datetime
     limit: int
     total_signals: int
+    recent_count: int
     up_signals: int
     down_signals: int
     market_type_counts: dict[str, int]
@@ -211,6 +214,8 @@ class UserSignalSettingsOut(BaseModel):
     feed_mode_enabled: bool
     strategy_mode_enabled: bool
     rsi_enabled: bool
+    settings_updated_at: datetime | None = None
+    settings_version: int = 0
 
 
 class RawCandidateIn(BaseModel):

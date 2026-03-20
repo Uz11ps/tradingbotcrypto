@@ -81,6 +81,33 @@ def _bounded_positive_int(value: int | None, *, default: int, upper: int) -> int
     return max(1, min(int(value), upper))
 
 
+def _resolve_short_history_window_hours(
+    *,
+    hours: int | None,
+    window_hours: int | None,
+    default: int,
+    upper: int,
+) -> int:
+    # Keep backward compatibility: support both `hours` and explicit `window_hours`.
+    selected = window_hours if window_hours is not None else hours
+    return _bounded_positive_int(selected, default=default, upper=upper)
+
+
+def _build_settings_version(updated_at: datetime | None) -> int:
+    if updated_at is None:
+        return 0
+    return int(updated_at.timestamp())
+
+
+async def _resolve_settings_meta(session: AsyncSession, *, chat_id: int | None) -> tuple[datetime | None, int]:
+    if not chat_id:
+        return None, 0
+    updated_at = await session.scalar(
+        select(UserSignalSettings.updated_at).where(UserSignalSettings.chat_id == chat_id)
+    )
+    return updated_at, _build_settings_version(updated_at)
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -491,6 +518,7 @@ async def stats_overview(session: AsyncSession = Depends(get_session)) -> StatsO
 @router.get("/stats/short-history", response_model=StatsShortHistoryOut)
 async def stats_short_history(
     hours: int | None = None,
+    window_hours: int | None = None,
     limit: int | None = None,
     symbol: str | None = None,
     timeframe: str | None = None,
@@ -499,9 +527,15 @@ async def stats_short_history(
 ) -> StatsShortHistoryOut:
     max_window = max(1, int(settings.signal_stats_short_window_hours))
     max_rows = max(1, int(settings.signal_stats_short_max_rows))
-    bounded_window_hours = _bounded_positive_int(hours, default=max_window, upper=max_window)
+    bounded_window_hours = _resolve_short_history_window_hours(
+        hours=hours,
+        window_hours=window_hours,
+        default=max_window,
+        upper=max_window,
+    )
     bounded_limit = _bounded_positive_int(limit, default=max_rows, upper=max_rows)
-    cutoff = datetime.now(tz=UTC) - timedelta(hours=bounded_window_hours)
+    window_end_at = datetime.now(tz=UTC)
+    cutoff = window_end_at - timedelta(hours=bounded_window_hours)
 
     signal_filters = [Signal.created_at >= cutoff]
     if symbol:
@@ -587,10 +621,13 @@ async def stats_short_history(
     ]
 
     return StatsShortHistoryOut(
-        generated_at=datetime.now(tz=UTC),
+        generated_at=window_end_at,
         window_hours=bounded_window_hours,
+        window_start_at=cutoff,
+        window_end_at=window_end_at,
         limit=bounded_limit,
         total_signals=total_signals,
+        recent_count=len(recent_signals),
         up_signals=up_signals,
         down_signals=down_signals,
         market_type_counts=market_type_counts,
@@ -774,6 +811,7 @@ async def get_user_settings(
     session: AsyncSession = Depends(get_session),
 ) -> UserSignalSettingsOut:
     effective = await get_effective_settings(session, chat_id=chat_id)
+    settings_updated_at, settings_version = await _resolve_settings_meta(session, chat_id=chat_id)
     return UserSignalSettingsOut(
         chat_id=chat_id or 0,
         lower_rsi=effective.lower_rsi,
@@ -786,6 +824,8 @@ async def get_user_settings(
         feed_mode_enabled=effective.feed_mode_enabled,
         strategy_mode_enabled=effective.strategy_mode_enabled,
         rsi_enabled=effective.rsi_enabled,
+        settings_updated_at=settings_updated_at,
+        settings_version=settings_version,
     )
 
 
@@ -809,6 +849,7 @@ async def update_user_settings(
         strategy_mode_enabled=payload.strategy_mode_enabled,
         rsi_enabled=payload.rsi_enabled,
     )
+    settings_updated_at, settings_version = await _resolve_settings_meta(session, chat_id=chat_id)
     return UserSignalSettingsOut(
         chat_id=chat_id,
         lower_rsi=effective.lower_rsi,
@@ -821,6 +862,8 @@ async def update_user_settings(
         feed_mode_enabled=effective.feed_mode_enabled,
         strategy_mode_enabled=effective.strategy_mode_enabled,
         rsi_enabled=effective.rsi_enabled,
+        settings_updated_at=settings_updated_at,
+        settings_version=settings_version,
     )
 
 
