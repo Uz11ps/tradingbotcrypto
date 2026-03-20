@@ -91,3 +91,26 @@ async def test_build_snapshot_same_for_ascending_and_descending(monkeypatch: pyt
     assert asc_snapshot.price_change_15m == desc_snapshot.price_change_15m
     assert asc_snapshot.window_open_price == desc_snapshot.window_open_price
     assert asc_snapshot.live_window_open_price == desc_snapshot.live_window_open_price
+
+
+def test_parse_kline_bar_supports_dict_rows() -> None:
+    row = {
+        "openTime": "1710000000000",
+        "open": "1.0",
+        "high": "1.1",
+        "low": "0.9",
+        "close": "1.05",
+        "volume": "12345.6",
+        "closeTime": "1710000300000",
+        "isClosed": True,
+    }
+    bar = binance_candles._parse_kline_bar(row)
+    assert bar is not None
+    assert bar.open_time_ms == 1710000000000
+    assert bar.close == 1.05
+    assert bar.is_closed is True
+
+
+def test_extract_close_and_volume_supports_dict_rows() -> None:
+    parsed = binance_candles._extract_close_and_volume({"close": "2.5", "volume": "77"})
+    assert parsed == (2.5, 77.0)

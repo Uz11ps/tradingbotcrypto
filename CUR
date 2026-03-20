@@ -1,6 +1,35 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-20 10:15:00] Hotfix: стабилизация worker-цикла (BingX kline dict/list parser)
+**Проблема в проде:**
+- Воркеры периодически падали с `KeyError: 0` в `app/services/binance_candles.py` (`fetch_recent_bars`).
+- Из-за рестартов `loop_cycle` не рос стабильно (в логах часто `cycle=1`), часть chat_id starvation'илась и не доходила до сигналов.
+- Дополнительно фиксировались ошибки `Failed to save/send ...` как следствие разрыва цикла.
+
+**Root cause:**
+- Парсер kline ожидал только формат `list` (`row[0]..row[7]`), а часть ответов BingX приходила в формате `dict` (ключи `openTime/open/...`).
+
+**Что изменено:**
+- `app/services/binance_candles.py`:
+  - добавлен универсальный парсинг свечей:
+    - `_parse_kline_bar(row)` поддерживает `list` и `dict`;
+    - `_extract_close_and_volume(row)` поддерживает `list` и `dict`;
+  - `fetch_recent_bars(...)` и `fetch_closes_and_volumes(...)` переведены на безопасный парсинг без индексации `row[0]` для `dict`.
+- `tests/test_binance_candles_snapshot.py`:
+  - добавлены тесты на dict-формат kline row и close/volume extraction.
+
+**Проверки:**
+- Таргетно: `python -m pytest -q tests/test_binance_candles_snapshot.py tests/test_worker_chat_fairness.py tests/test_stats_short_history_bounds.py` -> `12 passed`.
+- Полный регресс: `python -m pytest -q` -> `49 passed`.
+- `ReadLints` -> ошибок нет.
+
+**Ожидаемый эффект в проде:**
+- Воркеры перестают падать на kline parse.
+- Ротация chat обрабатывается нормально, `settings_trace` появляется по всем активным chat_id.
+- Сигналы возвращаются без "залипания" на 1-2 чатах.
+
+---
 ## [2026-03-20 08:10:00] Реализовано: PR9/F hotfix (settings version trace + short-history contract + strategy hard cooldown)
 **Контекст (по прод-диагностике):**
 - В проде повторялись вопросы "подхватил ли worker новые настройки" (TF/порог/market_type) без однозначного runtime-индикатора.

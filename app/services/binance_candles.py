@@ -108,6 +108,60 @@ def _parse_is_closed(value: Any) -> bool | None:
     return None
 
 
+def _extract_close_and_volume(row: Any) -> tuple[float, float] | None:
+    if isinstance(row, (list, tuple)):
+        if len(row) <= 5:
+            return None
+        return float(row[4]), float(row[5])
+    if isinstance(row, dict):
+        close_raw = row.get("close")
+        volume_raw = row.get("volume")
+        if close_raw is None or volume_raw is None:
+            return None
+        return float(close_raw), float(volume_raw)
+    return None
+
+
+def _parse_kline_bar(row: Any) -> KlineBar | None:
+    if isinstance(row, (list, tuple)):
+        if len(row) <= 5:
+            return None
+        return KlineBar(
+            open_time_ms=int(row[0]),
+            open=float(row[1]),
+            high=float(row[2]),
+            low=float(row[3]),
+            close=float(row[4]),
+            volume=float(row[5]),
+            close_time_ms=int(row[6]) if len(row) > 6 else None,
+            is_closed=_parse_is_closed(row[7]) if len(row) > 7 else None,
+        )
+    if isinstance(row, dict):
+        open_time_raw = row.get("openTime") or row.get("open_time") or row.get("time")
+        open_raw = row.get("open")
+        high_raw = row.get("high")
+        low_raw = row.get("low")
+        close_raw = row.get("close")
+        volume_raw = row.get("volume")
+        if None in (open_time_raw, open_raw, high_raw, low_raw, close_raw, volume_raw):
+            return None
+        close_time_raw = row.get("closeTime") or row.get("close_time")
+        is_closed_raw = row.get("isClosed")
+        if is_closed_raw is None:
+            is_closed_raw = row.get("closed")
+        return KlineBar(
+            open_time_ms=int(open_time_raw),
+            open=float(open_raw),
+            high=float(high_raw),
+            low=float(low_raw),
+            close=float(close_raw),
+            volume=float(volume_raw),
+            close_time_ms=int(close_time_raw) if close_time_raw is not None else None,
+            is_closed=_parse_is_closed(is_closed_raw),
+        )
+    return None
+
+
 def _normalize_bar_order(bars: list[KlineBar], *, symbol: str, timeframe: str) -> list[KlineBar]:
     if len(bars) < 2:
         return bars
@@ -172,9 +226,16 @@ async def fetch_closes_and_volumes(
     raw_payload: dict[str, Any] = response.json()
     if int(raw_payload.get("code", -1)) != 0:
         raise BinanceCandlesError(f"bingx klines error: {raw_payload}")
-    payload: list[list[Any]] = raw_payload.get("data") or []
-    closes = [float(row[4]) for row in payload if len(row) > 5]
-    volumes = [float(row[5]) for row in payload if len(row) > 5]
+    payload: list[Any] = raw_payload.get("data") or []
+    closes: list[float] = []
+    volumes: list[float] = []
+    for row in payload:
+        parsed = _extract_close_and_volume(row)
+        if parsed is None:
+            continue
+        close, volume = parsed
+        closes.append(close)
+        volumes.append(volume)
     if len(closes) < 30 or len(volumes) < 30:
         raise BinanceCandlesError(f"Not enough closes for {symbol} {timeframe}")
     return closes, volumes
@@ -202,23 +263,12 @@ async def fetch_recent_bars(
     raw_payload: dict[str, Any] = response.json()
     if int(raw_payload.get("code", -1)) != 0:
         raise BinanceCandlesError(f"bingx bars error: {raw_payload}")
-    payload: list[list[Any]] = raw_payload.get("data") or []
+    payload: list[Any] = raw_payload.get("data") or []
     bars: list[KlineBar] = []
     for row in payload:
-        if len(row) <= 5:
-            continue
-        bars.append(
-            KlineBar(
-                open_time_ms=int(row[0]),
-                open=float(row[1]),
-                high=float(row[2]),
-                low=float(row[3]),
-                close=float(row[4]),
-                volume=float(row[5]),
-                close_time_ms=int(row[6]) if len(row) > 6 else None,
-                is_closed=_parse_is_closed(row[7]) if len(row) > 7 else None,
-            )
-        )
+        bar = _parse_kline_bar(row)
+        if bar is not None:
+            bars.append(bar)
     if len(bars) < 30:
         raise BinanceCandlesError(f"Not enough bars for {symbol} {timeframe}")
     bars = _normalize_bar_order(bars, symbol=symbol, timeframe=timeframe)
