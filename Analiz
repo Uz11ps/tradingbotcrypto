@@ -1,0 +1,78 @@
+# Analiz - Полевой аудит деградации сигналов
+
+## [2026-03-22] Старт сессии (пошаговый режим)
+- Формат работы: 1 команда -> вывод -> интерпретация -> фиксация фактов.
+- Цель: восстановить стабильный поток сигналов и закрыть причины деградации.
+- Приоритеты: `P0 hotfix in prod` -> `P1 stage counts/reject/send` -> `P2 shard alignment` -> `P3 disk risk`.
+
+### Текущий статус
+- Шаг в работе: `P0.1` (доказать версию кода внутри контейнеров).
+- Ожидаем от пользователя: вывод первой команды.
+
+## [2026-03-22] P0.1 Результат
+- Команда: `docker exec tradingbotcrypto-signal_worker-1 python -c "import app.services.binance_candles as m; print(m.__file__)"`
+- Вывод: `/app/app/services/binance_candles.py`
+- Интерпретация: `PASS` — модуль `binance_candles` загружается из контейнера `signal_worker-1`, путь валидный.
+- Следующий шаг: `P0.2` (доказать наличие hotfix-парсинга `dict/list` в этом модуле).
+
+## [2026-03-22] Доп. наблюдение после P0.1
+- Пользователь повторно подтвердил тот же путь: `/app/app/services/binance_candles.py`.
+- Ошибки вида `CUR: command not found`, `Last: command not found`, `No such file or directory` возникли из-за вставки лишнего текста в shell.
+- Интерпретация: это не инцидент сервиса, а shell-шум; на аудит P0 не влияет.
+
+## [2026-03-22] P0.2 Результат
+- Команда: проверка содержимого `/app/app/services/binance_candles.py` внутри `signal_worker-1`.
+- Вывод:
+  - `has_parse=True`
+  - `has_extract=True`
+  - `has_dict=True`
+  - `has_list=True`
+- Интерпретация: `PASS` — hotfix-парсинг `dict/list` присутствует в реально работающем контейнере.
+- Следующий шаг: `P0.3` (проверка, что за окно 6h нет `KeyError: 0` и новых traceback).
+
+## [2026-03-22] P0.3 Результат
+- Команда: `docker compose logs --since=6h signal_worker | grep -E "KeyError: 0|Traceback \(most recent call last\)"`
+- Вывод: пусто.
+- Интерпретация: `PASS` — в окне `6h` не зафиксированы `KeyError: 0` и traceback у `signal_worker`.
+- Следующий шаг: `P0.4` (доказать отсутствие crash-паттерна через `cycle`/restart).
+
+## [2026-03-22] P0 РЕГРЕСС (REOPENED)
+- Пользователь прислал массовый поток ошибок:
+  - `signal_worker-1|2|3|4 | Traceback (most recent call last)`
+  - `signal_worker-1|2|3|4 | KeyError: 0`
+- Интерпретация:
+  - `P0` снова открыт: crash-loop реально есть, причина `KeyError: 0` не устранена полностью либо затрагивает другой участок кода.
+  - Предыдущий вывод `PASS P0.3` считаем невалидным для текущего окна наблюдения.
+- Следующий шаг:
+  - снять полный traceback с `File ... line ...` и зафиксировать точную функцию-источник падения.
+
+## [2026-03-22] P0.5 Traceback локализация (доказано)
+- Получен полный traceback:
+  - `/app/app/workers/mock_signal_worker.py:788` -> `provider.fetch_live_price(...)`
+  - `/app/app/services/market_provider.py:123` -> `fetch_candle_live_price(...)`
+  - `/app/app/services/binance_candles.py:371` -> `row = rows[0]`
+  - Exception: `KeyError: 0`
+- Интерпретация:
+  - текущий crash-loop вызван участком `fetch_live_price` (ticker parsing path), а не только `fetch_recent_bars`.
+  - Причина деградации сигналов подтверждена на этапе market data fetch (live price branch в RSI loop).
+- Следующий шаг:
+  - реализовать корневой фикс live-price parsing (без обходного отключения live trigger).
+
+## [2026-03-22] P0.6 Реализация root-fix (код + тесты)
+- Изменен `app/services/binance_candles.py`:
+  - добавлен robust разбор ticker `data` для форм `list/dict/map/sequence`;
+  - добавлен symbol-aware выбор строки (`_pick_symbol_row`);
+  - добавлен top-level разбор payload (`code/msg`) через `_is_success_code`;
+  - убраны хрупкие индексации `rows[0]` в live-price и quote-volume пути;
+  - добавлен shape-logging неизвестных payload (`bingx ticker unknown payload shape ...`);
+  - parse-fail теперь дает контролируемый `BinanceCandlesError` без `KeyError`.
+- Расширены тесты `tests/test_binance_candles_snapshot.py`:
+  - live ticker: `list`, `dict`, `symbol-map`, `sequence row`;
+  - non-zero code -> контролируемая ошибка;
+  - unknown shape -> контролируемая ошибка.
+- Результаты локальной валидации:
+  - `python -m pytest -q tests/test_binance_candles_snapshot.py` -> `11 passed`;
+  - `python -m pytest -q tests/test_worker_chat_fairness.py tests/test_stats_short_history_bounds.py` -> `9 passed`;
+  - `ReadLints` по измененным файлам -> ошибок нет.
+- Следующий шаг:
+  - выкат на сервер и повторный checkpoint P0 (`KeyError/cycle/restart`) по логам 2-6 часов.

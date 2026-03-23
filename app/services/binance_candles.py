@@ -31,6 +31,8 @@ RETRY_BACKOFF = 1.5
 log = logging.getLogger(__name__)
 _LIVE_PRICE_CACHE: dict[str, tuple[float, float]] = {}
 _LIVE_PRICE_CACHE_LOCK = asyncio.Lock()
+_UNKNOWN_TICKER_SHAPE_LAST_LOG_TS: dict[str, float] = {}
+_UNKNOWN_TICKER_SHAPE_LOG_TTL_SECONDS = 60.0
 
 
 class BinanceCandlesError(RuntimeError):
@@ -160,6 +162,144 @@ def _parse_kline_bar(row: Any) -> KlineBar | None:
             is_closed=_parse_is_closed(is_closed_raw),
         )
     return None
+
+
+def _normalize_data_rows(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, (list, tuple)):
+        rows: list[dict[str, Any]] = []
+        for row in data:
+            if isinstance(row, dict):
+                rows.append(row)
+            elif isinstance(row, (list, tuple)):
+                converted = _convert_sequence_row(row)
+                if converted is not None:
+                    rows.append(converted)
+        return rows
+    if isinstance(data, dict):
+        if _looks_like_ticker_row(data):
+            return [data]
+        rows = []
+        for key, value in data.items():
+            if isinstance(value, dict):
+                nested = dict(value)
+                if "symbol" not in nested and isinstance(key, str):
+                    nested["symbol"] = key
+                rows.append(nested)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    if isinstance(item, dict):
+                        nested = dict(item)
+                        if "symbol" not in nested and isinstance(key, str):
+                            nested["symbol"] = key
+                        rows.append(nested)
+                    elif isinstance(item, (list, tuple)):
+                        converted = _convert_sequence_row(item, symbol_hint=key if isinstance(key, str) else None)
+                        if converted is not None:
+                            rows.append(converted)
+        if rows:
+            return rows
+        return [data]
+    return []
+
+
+def _convert_sequence_row(row: list[Any] | tuple[Any, ...], *, symbol_hint: str | None = None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    out: dict[str, Any] = {}
+    if symbol_hint:
+        out["symbol"] = symbol_hint
+    first = row[0]
+    if isinstance(first, str):
+        out["symbol"] = first
+    # Best-effort mapping for compact ticker tuples.
+    if len(row) > 1:
+        out["lastPrice"] = row[1]
+    if len(row) > 2:
+        out["quoteVolume"] = row[2]
+    return out if out else None
+
+
+def _looks_like_ticker_row(row: dict[str, Any]) -> bool:
+    return any(
+        key in row
+        for key in ("lastPrice", "last", "close", "lastClose", "price", "p", "c", "quoteVolume", "symbol")
+    )
+
+
+def _extract_numeric(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_price_from_row(row: dict[str, Any]) -> float | None:
+    for key in ("lastPrice", "last", "close", "lastClose", "price", "p", "c"):
+        parsed = _extract_numeric(row.get(key))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _extract_quote_volume_from_row(row: dict[str, Any]) -> float | None:
+    for key in ("quoteVolume", "quoteVol", "qv"):
+        parsed = _extract_numeric(row.get(key))
+        if parsed is not None and parsed >= 0:
+            return parsed
+    return None
+
+
+def _normalize_symbol_value(value: Any) -> str:
+    return str(value or "").replace("/", "-").replace("_", "-").upper()
+
+
+def _pick_symbol_row(rows: list[dict[str, Any]], *, pair: str) -> dict[str, Any] | None:
+    pair_norm = _normalize_symbol_value(pair)
+    for row in rows:
+        symbol_value = _normalize_symbol_value(row.get("symbol") or row.get("s") or row.get("S"))
+        if symbol_value and symbol_value == pair_norm:
+            return row
+    return rows[0] if rows else None
+
+
+def _is_success_code(payload: dict[str, Any]) -> bool:
+    if "code" not in payload:
+        return True
+    code_raw = payload.get("code")
+    try:
+        return int(code_raw) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _summarize_payload_shape(data: Any) -> str:
+    if isinstance(data, dict):
+        keys = list(data.keys())[:8]
+        return f"dict(keys={keys})"
+    if isinstance(data, (list, tuple)):
+        first_type = type(data[0]).__name__ if data else "empty"
+        return f"list(len={len(data)},first={first_type})"
+    return type(data).__name__
+
+
+def _log_unknown_ticker_shape(*, symbol: str, market_type: str, data: Any, payload: dict[str, Any]) -> None:
+    shape = _summarize_payload_shape(data)
+    cache_key = f"{symbol}|{market_type}|{shape}"
+    now_ts = datetime.now(tz=UTC).timestamp()
+    last_ts = _UNKNOWN_TICKER_SHAPE_LAST_LOG_TS.get(cache_key, 0.0)
+    if (now_ts - last_ts) < _UNKNOWN_TICKER_SHAPE_LOG_TTL_SECONDS:
+        return
+    _UNKNOWN_TICKER_SHAPE_LAST_LOG_TS[cache_key] = now_ts
+    log.warning(
+        "bingx ticker unknown payload shape symbol=%s market=%s code=%s msg=%s shape=%s",
+        symbol,
+        market_type,
+        payload.get("code"),
+        payload.get("msg") or payload.get("message") or "-",
+        shape,
+    )
 
 
 def _normalize_bar_order(bars: list[KlineBar], *, symbol: str, timeframe: str) -> list[KlineBar]:
@@ -305,13 +445,23 @@ async def fetch_quote_volume_24h(*, symbol: str, market_type: str = "spot") -> f
         {"symbol": pair, "timestamp": int(datetime.now(tz=UTC).timestamp() * 1000)},
         label=f"bingx 24h ticker {market_type} {symbol}",
     )
-    payload: dict[str, Any] = response.json()
-    if int(payload.get("code", -1)) != 0:
-        raise BinanceCandlesError(f"bingx 24h ticker error: {payload}")
-    rows: list[dict[str, Any]] = payload.get("data") or []
-    if not rows:
+    payload_raw: Any = response.json()
+    if not isinstance(payload_raw, dict):
+        raise BinanceCandlesError(
+            f"bingx 24h ticker invalid payload type={type(payload_raw).__name__} symbol={symbol}"
+        )
+    payload = payload_raw
+    if not _is_success_code(payload):
+        raise BinanceCandlesError(
+            f"bingx 24h ticker error code={payload.get('code')} msg={payload.get('msg') or payload.get('message')}"
+        )
+    rows = _normalize_data_rows(payload.get("data"))
+    row = _pick_symbol_row(rows, pair=pair)
+    if row is None:
+        _log_unknown_ticker_shape(symbol=symbol, market_type=market_type, data=payload.get("data"), payload=payload)
         return 0.0
-    return float(rows[0].get("quoteVolume", 0.0) or 0.0)
+    quote_volume = _extract_quote_volume_from_row(row)
+    return float(quote_volume or 0.0)
 
 
 async def fetch_quote_volume_24h_map(
@@ -332,7 +482,7 @@ async def fetch_quote_volume_24h_map(
     raw_payload: dict[str, Any] = response.json()
     if int(raw_payload.get("code", -1)) != 0:
         raise BinanceCandlesError(f"bingx 24h ticker map error: {raw_payload}")
-    payload: list[dict[str, Any]] = raw_payload.get("data") or []
+    payload = _normalize_data_rows(raw_payload.get("data"))
     out: dict[str, float] = {}
     for row in payload:
         pair = str(row.get("symbol", ""))
@@ -361,23 +511,29 @@ async def fetch_live_price(
         {"symbol": pair, "timestamp": int(now_ts * 1000)},
         label=f"bingx live ticker {market_type} {symbol}",
     )
-    payload: dict[str, Any] = response.json()
-    if int(payload.get("code", -1)) != 0:
-        raise BinanceCandlesError(f"bingx live ticker error: {payload}")
-    rows: list[dict[str, Any]] = payload.get("data") or []
-    if not rows:
+    payload_raw: Any = response.json()
+    if not isinstance(payload_raw, dict):
+        raise BinanceCandlesError(
+            f"bingx live ticker invalid payload type={type(payload_raw).__name__} symbol={symbol}"
+        )
+    payload = payload_raw
+    if not _is_success_code(payload):
+        raise BinanceCandlesError(
+            f"bingx live ticker error code={payload.get('code')} msg={payload.get('msg') or payload.get('message')}"
+        )
+    data = payload.get("data")
+    rows = _normalize_data_rows(data)
+    row = _pick_symbol_row(rows, pair=pair)
+    if row is None:
+        _log_unknown_ticker_shape(symbol=symbol, market_type=market_type, data=data, payload=payload)
         raise BinanceCandlesError(f"bingx live ticker empty for {symbol}")
 
-    row = rows[0]
-    live_price = float(
-        row.get("lastPrice")
-        or row.get("last")
-        or row.get("close")
-        or row.get("lastClose")
-        or 0.0
-    )
-    if live_price <= 0:
-        raise BinanceCandlesError(f"bingx live ticker has invalid price for {symbol}: {row}")
+    live_price = _extract_price_from_row(row)
+    if live_price is None or live_price <= 0:
+        _log_unknown_ticker_shape(symbol=symbol, market_type=market_type, data=data, payload=payload)
+        raise BinanceCandlesError(
+            f"bingx live ticker has invalid price for {symbol}; shape={_summarize_payload_shape(data)}"
+        )
 
     if ttl > 0:
         async with _LIVE_PRICE_CACHE_LOCK:

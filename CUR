@@ -1,6 +1,154 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-22 13:05:00] Планируемый hotfix: live-price parsing hardening (закрытие класса KeyError)
+**Контекст:**
+- В проде повторно зафиксированы массовые падения `signal_worker-*` с:
+  - `KeyError: 0`
+  - traceback до `app/services/binance_candles.py`, `fetch_live_price`, строка `row = rows[0]`.
+- Это поддерживает crash-loop и деградацию потока сигналов.
+
+**Цель этапа:**
+- Починить `live-price parsing path` так, чтобы он безопасно обрабатывал все реальные формы ответа API и не падал runtime-исключением типа `KeyError`.
+
+**Что будет сделано:**
+- `app/services/binance_candles.py`:
+  - явный top-level разбор error-payload (`code/msg`) до парсинга данных;
+  - robust extraction ticker-rows без хрупкой индексации;
+  - symbol-aware выбор строки (изоляция по символу);
+  - shape-logging для неизвестных payload форм;
+  - преобразование parse-fail в `BinanceCandlesError` (без crash worker loop).
+- Поиск и устранение хрупких индексаций в `live-price`/ticker пути.
+- Тесты на реальные формы прод-ответов в `tests/test_binance_candles_snapshot.py`.
+
+**Критерии успеха:**
+- Нет `KeyError: 0` в `signal_worker` за окно наблюдения.
+- `fetch_live_price` либо возвращает цену, либо дает контролируемый `BinanceCandlesError`.
+- В логе есть диагностичный shape-trace для неизвестной формы без падения процесса.
+
+---
+## [2026-03-22 13:20:00] Реализовано: live-price parsing hardening (root-fix, без костылей)
+**Что изменено:**
+- `app/services/binance_candles.py`:
+  - добавлен robust parser для ticker `data`:
+    - `list` (rows),
+    - `dict` (single row),
+    - `dict map` (`symbol -> row`),
+    - compact `sequence row`;
+  - добавлен symbol-aware row selection (`_pick_symbol_row`);
+  - добавлен top-level payload code-check (`_is_success_code`) с явным `code/msg` в ошибке;
+  - устранены хрупкие места с `rows[0]` в live/volume ticker path;
+  - добавлен throttled shape-log для неизвестных форм payload:
+    - `bingx ticker unknown payload shape symbol=... market=... code=... msg=... shape=...`;
+  - все parse fail в ticker path приводятся к `BinanceCandlesError` (без `KeyError` crash).
+- `tests/test_binance_candles_snapshot.py`:
+  - добавлены кейсы live ticker:
+    - list data,
+    - dict data,
+    - symbol-map data,
+    - sequence row data,
+    - non-zero code error,
+    - unknown shape error.
+
+**Проверки локально:**
+- `python -m pytest -q tests/test_binance_candles_snapshot.py` -> `11 passed`.
+- `python -m pytest -q tests/test_worker_chat_fairness.py tests/test_stats_short_history_bounds.py` -> `9 passed`.
+- `ReadLints` по измененным файлам -> ошибок нет.
+
+**Ожидаемый прод-эффект:**
+- Исключение `KeyError: 0` в live-price path.
+- Worker loop не рвется на ticker parse, chat rotation и проход по pipeline стабилизируются.
+
+---
+## [2026-03-22 12:00:00] Запуск доказательного аудита (пошаговый режим)
+**Формат:**
+- Работаем строго по 1 команде.
+- После каждого вывода фиксируем факт и интерпретацию в `Analiz`.
+- Приоритеты: `P0` (hotfix в проде) -> `P1` (stage counts/reject/send) -> `P2` (shard alignment) -> `P3` (disk risk).
+
+**Цель текущей сессии:**
+- Доказать, что в контейнерах реально крутится версия с hotfix `binance_candles`.
+- Доказать отсутствие `KeyError: 0` и crash-паттерна `cycle=1` в окне 2-6 часов.
+- Затем собрать полные метрики пайплайна (`found/accepted/rejected/sent`) и остаточные риски.
+
+---
+## [2026-03-22 12:10:00] Чекпоинт P0.1 (подтверждение пути модуля в прод-контейнере)
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker exec tradingbotcrypto-signal_worker-1 python -c "import app.services.binance_candles as m; print(m.__file__)"`
+
+**Факт:**
+- Получен путь: `/app/app/services/binance_candles.py`.
+
+**Интерпретация:**
+- `PASS`: модуль `binance_candles` реально загружается из рабочего контейнера `signal_worker-1`.
+- Следом идем на `P0.2`: проверка, что в этом модуле присутствует hotfix-поддержка `dict/list`.
+
+---
+## [2026-03-22 12:15:00] Уточнение после P0.1
+**Факт:**
+- Путь модуля в контейнере повторно подтвержден: `/app/app/services/binance_candles.py`.
+
+**Техническая пометка:**
+- Ошибки shell (`CUR: command not found`, `Last: command not found`) вызваны вставкой в терминал посторонних строк из чата.
+- На состояние контейнеров и вывод по P0 не влияет.
+
+---
+## [2026-03-22 12:20:00] Чекпоинт P0.2 (подтверждение hotfix-кода в контейнере)
+**Команда:**
+- чтение `/app/app/services/binance_candles.py` внутри `tradingbotcrypto-signal_worker-1` с проверкой маркеров:
+  - `def _parse_kline_bar`
+  - `def _extract_close_and_volume`
+  - `isinstance(row, dict)`
+  - `isinstance(row, (list, tuple))`
+
+**Факт:**
+- Все четыре маркера вернулись `True`.
+
+**Интерпретация:**
+- `PASS`: версия кода в прод-контейнере содержит нужный hotfix-парсинг `dict/list`.
+- Следом идем на `P0.3`: отсутствие `KeyError: 0` и traceback в окне `6h`.
+
+---
+## [2026-03-22 12:30:00] Чекпоинт P0.3 (ошибки воркера за 6 часов)
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose logs --since=6h signal_worker | grep -E "KeyError: 0|Traceback \(most recent call last\)"`
+
+**Факт:**
+- Вывод пустой.
+
+**Интерпретация:**
+- `PASS`: в окне `6h` не обнаружены `KeyError: 0` и traceback у `signal_worker`.
+- Следующий чекпоинт: `P0.4` — подтвердить, что нет повторного crash-паттерна (`cycle=1` + рестарты).
+
+---
+## [2026-03-22 12:40:00] REGRESSION: P0 reopened (массовый KeyError:0)
+**Факт:**
+- В новом окне пользователь прислал множественные строки:
+  - `signal_worker-* | Traceback (most recent call last)`
+  - `signal_worker-* | KeyError: 0`
+- Ошибка наблюдается на нескольких контейнерах (`signal_worker-1/2/3/4`), повторно и серийно.
+
+**Интерпретация:**
+- Чекпоинт `P0.3 PASS` не подтвержден во времени, статус аудита меняется на `REOPENED`.
+- Требуется немедленная локализация источника по полному traceback (`File/line/function`), затем точечный hotfix.
+
+---
+## [2026-03-22 12:50:00] Локализация текущего падения (trace-backed)
+**Полученный traceback:**
+- `mock_signal_worker.py:1418` -> `_run_rsi_mode(...)`
+- `mock_signal_worker.py:788` -> `provider.fetch_live_price(...)`
+- `market_provider.py:123` -> `fetch_candle_live_price(...)`
+- `binance_candles.py:371` -> `row = rows[0]`
+- `Exception`: `KeyError: 0`
+
+**Вывод:**
+- Текущий crash-loop связан с `fetch_live_price` (ticker parsing path) в live ветке цикла.
+- Это отдельная точка отказа, которая сохраняет деградацию сигналов даже после фикса `kline dict/list`.
+
+**Операционный next step:**
+- Временно переключить `SIGNAL_TRIGGER_MODE=candle` для обхода live-price ветки до выката постоянного фикса.
+
+---
 ## [2026-03-20 10:15:00] Hotfix: стабилизация worker-цикла (BingX kline dict/list parser)
 **Проблема в проде:**
 - Воркеры периодически падали с `KeyError: 0` в `app/services/binance_candles.py` (`fetch_recent_bars`).
