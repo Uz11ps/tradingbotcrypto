@@ -634,6 +634,54 @@ async def _run_rsi_mode(
             trigger_mode = "candle"
         settings_updated_at = str(effective.get("settings_updated_at") or "-")
         settings_version = int(effective.get("settings_version") or 0)
+        strategy_impulse_window = max(
+            2,
+            int(
+                effective.get(
+                    "strategy_impulse_window",
+                    settings.signal_strategy_impulse_window,
+                )
+            ),
+        )
+        strategy_deviation_threshold_pct = max(
+            0.1,
+            float(
+                effective.get(
+                    "strategy_deviation_threshold_pct",
+                    settings.signal_strategy_deviation_threshold_pct,
+                )
+            ),
+        )
+        strategy_min_pinbar_strength = max(
+            0.1,
+            float(
+                effective.get(
+                    "strategy_min_pinbar_strength",
+                    settings.signal_strategy_min_pinbar_strength,
+                )
+            ),
+        )
+        strategy_max_body_ratio = min(
+            1.0,
+            max(
+                0.01,
+                float(
+                    effective.get(
+                        "strategy_max_body_ratio",
+                        settings.signal_strategy_max_body_ratio,
+                    )
+                ),
+            ),
+        )
+        strategy_max_signals_per_cycle = max(
+            1,
+            int(
+                effective.get(
+                    "strategy_max_signals_per_cycle",
+                    settings.signal_strategy_max_signals_per_cycle,
+                )
+            ),
+        )
         log.info(
             (
                 "settings_trace chat_id=%s selected_tf=%s effective_tf=%s "
@@ -646,6 +694,21 @@ async def _run_rsi_mode(
             selected_threshold,
             max(trigger_5m, trigger_15m),
             trigger_mode,
+            settings_version,
+            settings_updated_at,
+        )
+        log.info(
+            (
+                "strategy_settings_trace chat_id=%s impulse_window=%s deviation_threshold=%.4f "
+                "min_pinbar_strength=%.4f max_body_ratio=%.4f strategy_max_signals_per_cycle=%s "
+                "settings_version=%s settings_updated_at=%s"
+            ),
+            chat_id,
+            strategy_impulse_window,
+            strategy_deviation_threshold_pct,
+            strategy_min_pinbar_strength,
+            strategy_max_body_ratio,
+            strategy_max_signals_per_cycle,
             settings_version,
             settings_updated_at,
         )
@@ -677,6 +740,7 @@ async def _run_rsi_mode(
         strategy_mode_enabled = bool(effective.get("strategy_mode_enabled", True))
         rsi_enabled = bool(effective.get("rsi_enabled", True))
         sent_in_cycle = 0
+        strategy_sent_in_cycle = 0
         max_signals_per_cycle = max(1, settings.feed_movers_limit)
         for route in resolution.enabled_routes:
             market_type = route.market_type
@@ -1035,7 +1099,11 @@ async def _run_rsi_mode(
                                             chat_id,
                                         )
 
-                    if strategy_mode_enabled and sent_in_cycle < max_signals_per_cycle:
+                    if (
+                        strategy_mode_enabled
+                        and sent_in_cycle < max_signals_per_cycle
+                        and strategy_sent_in_cycle < strategy_max_signals_per_cycle
+                    ):
                         try:
                             bars = await provider.fetch_recent_bars(
                                 symbol=symbol,
@@ -1048,6 +1116,10 @@ async def _run_rsi_mode(
                                 bars=bars,
                                 generated_at=snapshot.generated_at,
                                 market_type=market_type,
+                                impulse_window=strategy_impulse_window,
+                                deviation_threshold_pct=strategy_deviation_threshold_pct,
+                                min_pinbar_strength=strategy_min_pinbar_strength,
+                                max_body_ratio=strategy_max_body_ratio,
                             )
                         except BinanceCandlesError:
                             strategy_candidate = None
@@ -1062,7 +1134,13 @@ async def _run_rsi_mode(
                                 mode="strategy",
                                 decision="reject",
                                 reject_reason="reject_no_strategy_setup",
-                                payload={"timeframe": selected_tf},
+                                payload={
+                                    "timeframe": selected_tf,
+                                    "impulse_window": strategy_impulse_window,
+                                    "deviation_threshold_pct": strategy_deviation_threshold_pct,
+                                    "min_pinbar_strength": strategy_min_pinbar_strength,
+                                    "max_body_ratio": strategy_max_body_ratio,
+                                },
                             )
                             continue
 
@@ -1150,6 +1228,7 @@ async def _run_rsi_mode(
                                 symbol=strategy_candidate.symbol,
                             )
                             sent_in_cycle += 1
+                            strategy_sent_in_cycle += 1
                             await _debug_scan_event(
                                 client,
                                 chat_id=chat_id,

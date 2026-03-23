@@ -26,6 +26,11 @@ class EffectiveUserSettings:
     market_type: str
     feed_mode_enabled: bool
     strategy_mode_enabled: bool
+    strategy_impulse_window: int
+    strategy_deviation_threshold_pct: float
+    strategy_min_pinbar_strength: float
+    strategy_max_body_ratio: float
+    strategy_max_signals_per_cycle: int
     rsi_enabled: bool
 
 
@@ -51,6 +56,11 @@ def get_global_defaults() -> EffectiveUserSettings:
         market_type="both",
         feed_mode_enabled=True,
         strategy_mode_enabled=True,
+        strategy_impulse_window=max(2, int(settings.signal_strategy_impulse_window)),
+        strategy_deviation_threshold_pct=max(0.1, float(settings.signal_strategy_deviation_threshold_pct)),
+        strategy_min_pinbar_strength=max(0.1, float(settings.signal_strategy_min_pinbar_strength)),
+        strategy_max_body_ratio=min(1.0, max(0.01, float(settings.signal_strategy_max_body_ratio))),
+        strategy_max_signals_per_cycle=max(1, int(settings.signal_strategy_max_signals_per_cycle)),
         rsi_enabled=True,
     )
 
@@ -94,6 +104,31 @@ async def get_effective_settings(
             if row.strategy_mode_enabled is not None
             else defaults.strategy_mode_enabled
         ),
+        strategy_impulse_window=(
+            max(2, int(row.strategy_impulse_window))
+            if row.strategy_impulse_window is not None
+            else defaults.strategy_impulse_window
+        ),
+        strategy_deviation_threshold_pct=(
+            max(0.1, float(row.strategy_deviation_threshold_pct))
+            if row.strategy_deviation_threshold_pct is not None
+            else defaults.strategy_deviation_threshold_pct
+        ),
+        strategy_min_pinbar_strength=(
+            max(0.1, float(row.strategy_min_pinbar_strength))
+            if row.strategy_min_pinbar_strength is not None
+            else defaults.strategy_min_pinbar_strength
+        ),
+        strategy_max_body_ratio=(
+            min(1.0, max(0.01, float(row.strategy_max_body_ratio)))
+            if row.strategy_max_body_ratio is not None
+            else defaults.strategy_max_body_ratio
+        ),
+        strategy_max_signals_per_cycle=(
+            max(1, int(row.strategy_max_signals_per_cycle))
+            if row.strategy_max_signals_per_cycle is not None
+            else defaults.strategy_max_signals_per_cycle
+        ),
         rsi_enabled=(
             bool(row.rsi_enabled)
             if row.rsi_enabled is not None
@@ -115,6 +150,11 @@ async def upsert_user_settings(
     market_type: str | None = None,
     feed_mode_enabled: bool | None = None,
     strategy_mode_enabled: bool | None = None,
+    strategy_impulse_window: int | None = None,
+    strategy_deviation_threshold_pct: float | None = None,
+    strategy_min_pinbar_strength: float | None = None,
+    strategy_max_body_ratio: float | None = None,
+    strategy_max_signals_per_cycle: int | None = None,
     rsi_enabled: bool | None = None,
 ) -> EffectiveUserSettings:
     row = await session.scalar(select(UserSignalSettings).where(UserSignalSettings.chat_id == chat_id))
@@ -140,6 +180,16 @@ async def upsert_user_settings(
         row.feed_mode_enabled = bool(feed_mode_enabled)
     if strategy_mode_enabled is not None:
         row.strategy_mode_enabled = bool(strategy_mode_enabled)
+    if strategy_impulse_window is not None:
+        row.strategy_impulse_window = max(2, int(strategy_impulse_window))
+    if strategy_deviation_threshold_pct is not None:
+        row.strategy_deviation_threshold_pct = max(0.1, float(strategy_deviation_threshold_pct))
+    if strategy_min_pinbar_strength is not None:
+        row.strategy_min_pinbar_strength = max(0.1, float(strategy_min_pinbar_strength))
+    if strategy_max_body_ratio is not None:
+        row.strategy_max_body_ratio = min(1.0, max(0.01, float(strategy_max_body_ratio)))
+    if strategy_max_signals_per_cycle is not None:
+        row.strategy_max_signals_per_cycle = max(1, int(strategy_max_signals_per_cycle))
     if rsi_enabled is not None:
         row.rsi_enabled = bool(rsi_enabled)
 

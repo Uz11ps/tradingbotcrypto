@@ -199,6 +199,11 @@ class UserSignalSettingsUpdate(BaseModel):
     market_type: str | None = None
     feed_mode_enabled: bool | None = None
     strategy_mode_enabled: bool | None = None
+    strategy_impulse_window: int | None = None
+    strategy_deviation_threshold_pct: float | None = None
+    strategy_min_pinbar_strength: float | None = None
+    strategy_max_body_ratio: float | None = None
+    strategy_max_signals_per_cycle: int | None = None
     rsi_enabled: bool | None = None
 
 
@@ -213,6 +218,11 @@ class UserSignalSettingsOut(BaseModel):
     market_type: str
     feed_mode_enabled: bool
     strategy_mode_enabled: bool
+    strategy_impulse_window: int
+    strategy_deviation_threshold_pct: float
+    strategy_min_pinbar_strength: float
+    strategy_max_body_ratio: float
+    strategy_max_signals_per_cycle: int
     rsi_enabled: bool
     settings_updated_at: datetime | None = None
     settings_version: int = 0

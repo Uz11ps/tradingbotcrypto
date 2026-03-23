@@ -101,6 +101,11 @@ class UserSignalSettings(Base):
     market_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     feed_mode_enabled: Mapped[bool] = mapped_column(default=True)
     strategy_mode_enabled: Mapped[bool] = mapped_column(default=True)
+    strategy_impulse_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_deviation_threshold_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strategy_min_pinbar_strength: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strategy_max_body_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    strategy_max_signals_per_cycle: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rsi_enabled: Mapped[bool] = mapped_column(default=True)
 
 

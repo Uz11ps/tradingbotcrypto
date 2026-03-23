@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     signal_soft_flip_window_seconds: int = 300
     signal_soft_flip_min_move_pct: float = 1.0
     signal_soft_flip_log_only: bool = True
+    signal_strategy_impulse_window: int = 12
+    signal_strategy_deviation_threshold_pct: float = 4.0
+    signal_strategy_min_pinbar_strength: float = 2.0
+    signal_strategy_max_body_ratio: float = 0.35
+    signal_strategy_max_signals_per_cycle: int = 20
     signal_strategy_symbol_cooldown_seconds: int = 1800
     signal_filter_redis_prefix: str = "signal_filter"
     signal_filter_memory_state_ttl_seconds: int = 7200

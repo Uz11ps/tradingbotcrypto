@@ -122,6 +122,11 @@ class ApiClient:
         market_type: str | None = None,
         feed_mode_enabled: bool | None = None,
         strategy_mode_enabled: bool | None = None,
+        strategy_impulse_window: int | None = None,
+        strategy_deviation_threshold_pct: float | None = None,
+        strategy_min_pinbar_strength: float | None = None,
+        strategy_max_body_ratio: float | None = None,
+        strategy_max_signals_per_cycle: int | None = None,
         rsi_enabled: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
@@ -143,6 +148,16 @@ class ApiClient:
             payload["feed_mode_enabled"] = feed_mode_enabled
         if strategy_mode_enabled is not None:
             payload["strategy_mode_enabled"] = strategy_mode_enabled
+        if strategy_impulse_window is not None:
+            payload["strategy_impulse_window"] = strategy_impulse_window
+        if strategy_deviation_threshold_pct is not None:
+            payload["strategy_deviation_threshold_pct"] = strategy_deviation_threshold_pct
+        if strategy_min_pinbar_strength is not None:
+            payload["strategy_min_pinbar_strength"] = strategy_min_pinbar_strength
+        if strategy_max_body_ratio is not None:
+            payload["strategy_max_body_ratio"] = strategy_max_body_ratio
+        if strategy_max_signals_per_cycle is not None:
+            payload["strategy_max_signals_per_cycle"] = strategy_max_signals_per_cycle
         if rsi_enabled is not None:
             payload["rsi_enabled"] = rsi_enabled
         r = await self._client.post("/user-settings", params={"chat_id": chat_id}, json=payload)
