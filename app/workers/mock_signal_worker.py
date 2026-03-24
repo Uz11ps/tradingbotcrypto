@@ -1120,6 +1120,7 @@ async def _run_rsi_mode(
                                 deviation_threshold_pct=strategy_deviation_threshold_pct,
                                 min_pinbar_strength=strategy_min_pinbar_strength,
                                 max_body_ratio=strategy_max_body_ratio,
+                                require_confirmation=bool(settings.signal_strategy_require_confirmation),
                             )
                         except BinanceCandlesError:
                             strategy_candidate = None
@@ -1147,13 +1148,25 @@ async def _run_rsi_mode(
                         strategy_proxy = _FilterProxy(
                             symbol=strategy_candidate.symbol,
                             timeframe=strategy_candidate.timeframe,
-                            signal_type=(
-                                "post_pump_pullback_short"
-                                if strategy_candidate.direction == "short"
-                                else "post_dump_bounce_long"
-                            ),
+                            # Keep strategy dedup/cooldown memory on one key regardless side
+                            # to prevent rapid back-to-back strategy spam on the same symbol.
+                            signal_type="strategy",
                             current_price=strategy_candidate.current_price,
                         )
+                        strategy_direction = "down" if strategy_candidate.direction == "short" else "up"
+                        if not matches_signal_side_mode(side_mode, direction=strategy_direction):
+                            await _debug_raw_candidate(
+                                client,
+                                chat_id=chat_id,
+                                symbol=strategy_candidate.symbol,
+                                timeframe=strategy_candidate.timeframe,
+                                market_type=market_type,
+                                mode="strategy",
+                                decision="reject",
+                                reject_reason="reject_side_mode",
+                                payload={"signal_type": strategy_direction, "mode": side_mode},
+                            )
+                            continue
                         accepted, reject = await filters.accept(strategy_proxy, scope=f"{chat_id}:strategy")
                         if not accepted:
                             await _debug_raw_candidate(
@@ -1168,28 +1181,6 @@ async def _run_rsi_mode(
                                 payload={"details": reject.details if reject else "-"},
                             )
                             continue
-                        hard_allowed, wait_left_seconds = _strategy_symbol_cooldown_allows(
-                            chat_id=chat_id,
-                            symbol=strategy_candidate.symbol,
-                        )
-                        if not hard_allowed:
-                            await _debug_raw_candidate(
-                                client,
-                                chat_id=chat_id,
-                                symbol=strategy_candidate.symbol,
-                                timeframe=strategy_candidate.timeframe,
-                                market_type=market_type,
-                                mode="strategy",
-                                decision="reject",
-                                reject_reason="reject_strategy_symbol_cooldown",
-                                payload={
-                                    "wait_left_seconds": wait_left_seconds,
-                                    "symbol_cooldown_seconds": settings.signal_strategy_symbol_cooldown_seconds,
-                                },
-                            )
-                            continue
-
-                        strategy_direction = "down" if strategy_candidate.direction == "short" else "up"
                         strategy_signal_type = (
                             "post_pump_pullback_short"
                             if strategy_candidate.direction == "short"
@@ -1222,10 +1213,6 @@ async def _run_rsi_mode(
                                 chat_id,
                                 format_strategy_signal_card(strategy_candidate),
                                 reply_markup=bottom_chat_menu_kb(),
-                            )
-                            _mark_strategy_symbol_sent(
-                                chat_id=chat_id,
-                                symbol=strategy_candidate.symbol,
                             )
                             sent_in_cycle += 1
                             strategy_sent_in_cycle += 1

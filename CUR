@@ -1,6 +1,125 @@
 # CUR - Журнал системных изменений
 
 ---
+## [2026-03-23 11:55:00] P2 shard alignment (конфиг vs факт)
+**Команда:**
+- проверка `.env` shard count, числа worker-реплик и `no shard slot acquired` за 24h.
+
+**Факт:**
+- `WORKER_SHARD_COUNT=5`
+- `running_workers=4`
+- `no_slot_errors_24h=0`
+
+**Интерпретация:**
+- Есть конфигурационный рассинхрон (`count=5` при `4` репликах).
+- В текущем окне это не проявилось как slot-error, но оставляет риск coverage/standby в будущих recreate сценариях.
+- Next step: выровнять `WORKER_SHARD_COUNT` до `4` и перезапустить `signal_worker`.
+
+---
+## [2026-03-23 12:00:00] P2 shard setup после выравнивания
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose logs --since=8m signal_worker | grep "RSI worker shard setup"`
+
+**Факт:**
+- `signal_worker-3 -> index=0 count=4`
+- `signal_worker-1 -> index=1 count=4`
+- `signal_worker-2 -> index=2 count=4`
+- `signal_worker-4 -> index=3 count=4`
+
+**Интерпретация:**
+- Shard assignment корректный и уникальный.
+- Конфиг-рассинхрон устранен, покрытие по shard полное (`0..3`).
+
+---
+## [2026-03-23 12:05:00] P3 диск: базовый срез
+**Команда:**
+- `df -h`
+
+**Факт:**
+- `/dev/sda1`: `14G total`, `9.5G used`, `4.1G avail`, `71%`.
+
+**Интерпретация:**
+- Для небольшого root-диска это заметная загрузка (не аварийная, но уже зона внимания).
+- Требуется детализация Docker usage по категориям (`images/containers/volumes/build-cache`).
+
+---
+## [2026-03-23 12:10:00] P3 диск: docker breakdown
+**Команда:**
+- `docker system df -v`
+
+**Факты:**
+- `Build cache usage: 4.24GB` (самая крупная категория).
+- Образы:
+  - `signal_worker unique ~212MB`
+  - `api unique ~85MB`
+  - `bot unique ~85MB`
+  - `postgres unique ~395MB`
+  - `redis unique ~61MB`
+- Volumes:
+  - основной `tradingbotcrypto_postgres_data ~1.054GB`
+- Writable layer контейнеров минимальный (KB-уровень).
+
+**Интерпретация:**
+- Основной источник загрузки диска сейчас — build cache.
+- Очистку следует начинать с build cache (минимальный операционный риск).
+- DB volume трогать только с backup-планом.
+
+---
+## [2026-03-23 12:15:00] P3 cleanup: docker builder prune
+**Команда:**
+- `docker builder prune -af`
+
+**Факт:**
+- Команда отработала, показан список множества удаляемых cache entries.
+- В присланном куске вывода нет финальной строки `Total reclaimed space`.
+
+**Интерпретация:**
+- Чистка build cache выполнена.
+- Для доказательного эффекта требуется post-check свободного места (`df -h`).
+
+---
+## [2026-03-23 12:20:00] P3 post-cleanup результат (df -h)
+**Команда:**
+- `df -h`
+
+**Факт:**
+- До чистки: `/dev/sda1 14G total, 9.5G used, 4.1G avail, 71%`.
+- После чистки: `/dev/sda1 14G total, 5.6G used, 7.9G avail, 42%`.
+
+**Интерпретация:**
+- Освобождено около `3.9G`.
+- Текущий disk-risk существенно снижен.
+- Подтверждено, что крупнейший источник загрузки был build cache Docker.
+
+---
+## [2026-03-23 12:25:00] Промежуточный финальный health-check (смешанный сигнал)
+**Факт из логов:**
+- Есть успешные send события:
+  - `decision_trace signal_sent chat_id=5164788770 symbol=TAA/USDT ...`
+  - `decision_trace signal_sent chat_id=5164788770 symbol=CRK/USDT ...`
+  - `decision_trace signal_sent chat_id=5164788770 symbol=WP/USDT ...`
+- Одновременно в логе присутствует:
+  - `signal_worker-4 | Traceback (most recent call last):`
+
+**Интерпретация:**
+- Поток сигналов восстановлен и работает.
+- Но остается как минимум одна непойманная runtime ошибка; нужен полный traceback для классификации причины.
+
+---
+## [2026-03-23 12:30:00] Классификация traceback (по выжимке)
+**Факты:**
+- Кейс A: `TelegramForbiddenError: bot was blocked by the user`
+  - точка: `mock_signal_worker.py` -> `bot.send_message(...)`.
+- Кейс B: `BinanceCandlesError: Not enough bars for <symbol> 15m`
+  - точка: `build_snapshot -> fetch_recent_bars`.
+
+**Интерпретация:**
+- Оба traceback-класса не равны регрессии `KeyError: 0`.
+- Кейс A — операционный per-chat delivery fail (blocked user).
+- Кейс B — data-quality reject по отдельным символам (недостаток свечей).
+- Вывод: root-fix live-price parsing не опровергнут этими traceback.
+
+---
 ## [2026-03-22 13:05:00] Планируемый hotfix: live-price parsing hardening (закрытие класса KeyError)
 **Контекст:**
 - В проде повторно зафиксированы массовые падения `signal_worker-*` с:
@@ -58,6 +177,169 @@
 **Ожидаемый прод-эффект:**
 - Исключение `KeyError: 0` в live-price path.
 - Worker loop не рвется на ticker parse, chat rotation и проход по pipeline стабилизируются.
+
+---
+## [2026-03-22 13:35:00] Серверный деплой-контроль: git pull
+**Команда:**
+- `cd /opt/tradingbotcrypto && git pull --ff-only origin main`
+
+**Факт:**
+- `Fast-forward` от `5578638` до `0e574e4`.
+- На сервер подтянуты:
+  - `app/services/binance_candles.py`
+  - `tests/test_binance_candles_snapshot.py`
+  - `CUR`
+  - `Analiz`
+
+**Интерпретация:**
+- Код root-fix присутствует в серверном checkout.
+- Следующий шаг: пересобрать/перезапустить `signal_worker` и подтвердить runtime-стабильность (`KeyError/cycle/restart`).
+
+---
+## [2026-03-22 13:50:00] Серверный деплой-контроль: worker recreate
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose --profile worker up -d --no-deps --build --force-recreate --scale signal_worker=4 signal_worker`
+
+**Факт:**
+- Образ `tradingbotcrypto-signal_worker` пересобран.
+- Контейнеры `signal_worker-1..4` успешно перезапущены (`Started`).
+
+**Интерпретация:**
+- Версия с root-fix запущена в runtime на worker-контейнерах.
+- Следующий чекпоинт: свежий лог-контроль на отсутствие `KeyError: 0` и traceback после рестарта.
+
+---
+## [2026-03-22 14:05:00] Чекпоинт после релиза (20m)
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose logs --since=20m signal_worker | grep -E "KeyError: 0|Traceback \(most recent call last\)"`
+
+**Факт:**
+- Вывод пустой.
+
+**Интерпретация:**
+- В свежем окне после деплоя не зафиксирована crash-сигнатура `KeyError: 0`.
+- Следом проверяем `cycle`/restart-паттерн и возврат сигнального потока.
+
+---
+## [2026-03-23 11:05:00] Проверка цикла после недавнего рестарта (ранний срез)
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose logs --since=6m signal_worker | grep "chat_round_robin_trace"`
+
+**Факт:**
+- Для `signal_worker-1..4` виден `chat_round_robin_trace`, но только `cycle=1`.
+
+**Интерпретация:**
+- Это стартовый срез в первые минуты после recreate.
+- По нему нельзя делать вывод о restart-loop; нужен повторный срез позже с проверкой `cycle>=2`.
+
+---
+## [2026-03-23 11:15:00] Промежуточный runtime-апдейт после релиза
+**Факт:**
+- Пользователь сообщил, что сигналы начали приходить.
+- Проверка:
+  - `docker compose logs --since=20m signal_worker | grep -E "KeyError: 0|Traceback \(most recent call last\)"` -> пусто.
+
+**Наблюдение:**
+- `chat_round_robin_trace` в свежем окне данных не дал (пустой вывод на повторном срезе).
+
+**Интерпретация:**
+- Crash-сигнатура после root-fix не наблюдается.
+- Для доказательства стабильности и активности цикла дальше используем `settings_trace` + `decision_trace signal_sent`.
+
+---
+## [2026-03-23 11:20:00] Подтверждение восстановления потока (runtime logs)
+**Команда:**
+- `cd /opt/tradingbotcrypto && docker compose logs --since=15m signal_worker | grep -E "settings_trace chat_id=|decision_trace signal_sent chat_id="`
+
+**Факты:**
+- `settings_trace` идет по нескольким chat_id:
+  - `916948327`
+  - `790218266`
+  - `562899945`
+  - `5164788770`
+- Зафиксирован send-event:
+  - `signal_worker-2 | 2026-03-23 11:05:35,904`
+  - `decision_trace signal_sent chat_id=5164788770 symbol=POKEE/USDT ... change=9.6082 threshold=5.0000 trigger_source=live_spike`
+
+**Интерпретация:**
+- Worker loop живой, multi-chat проход восстановлен.
+- Send-path подтвержден фактами, сигналы снова доходят до отправки.
+- Следующий этап: количественный P1 срез (`found/accepted/rejected/sent` + reject reasons).
+
+---
+## [2026-03-23 11:30:00] P1 количественный срез (24h)
+**Команда (SQL):**
+- агрегат `found/accepted/rejected` из `raw_candidates` + `sent` из `signals`.
+
+**Факт:**
+- `found=87440`
+- `accepted=22`
+- `rejected=87418`
+- `sent=338`
+
+**Интерпретация:**
+- Поток отправки в проде активен (`sent > 0`).
+- `accepted` (telemetry table) и `sent` (signals table) в текущем режиме не образуют строгую воронку 1:1.
+- Для строгой stage-воронки нужен full debug audit или сквозной event-correlation.
+
+---
+## [2026-03-23 11:35:00] P1 reject reasons (24h, фактами)
+**Команда (SQL):**
+- top reject reasons из `raw_candidates` за 24h.
+
+**Факт:**
+- `reject_no_strategy_setup = 43414`
+- `reject_price_trigger = 42742`
+- `reject_rsi_filter = 726`
+- `reject_user_min_move = 287`
+- `cooldown = 130`
+- `duplicate = 126`
+- `stale_repeat = 5`
+
+**Интерпретация:**
+- Основной отсев на ранних этапах (`strategy setup` / `price trigger`), а не на антиспам-подавлении.
+- Suppression механизмы (`cooldown/duplicate/stale_repeat`) не доминируют в текущей деградации.
+
+---
+## [2026-03-23 11:40:00] P1 send-path счетчики (24h)
+**Команда:**
+- подсчет по логам worker:
+  - `decision_trace signal_sent`
+  - `Failed to save/send RSI feed alert|Failed to save/send strategy alert`
+
+**Факт:**
+- `sent_count=6`
+- `send_fail_count=6`
+
+**Интерпретация:**
+- Канал отправки в текущем окне нестабилен, требуется разбор причин фейлов по traceback.
+- Следующий шаг: извлечь детальные stack/exception блоки для send-fail.
+
+---
+## [2026-03-23 11:45:00] P1 send-fail причины (разбор traceback)
+**Факты по логам:**
+- `Failed to save/send strategy alert ... chat_id=562899945` -> `aiogram.exceptions.TelegramForbiddenError: bot was blocked by the user`
+- `Failed to save/send strategy alert ... chat_id=916948327` -> `aiogram.exceptions.TelegramForbiddenError: bot was blocked by the user`
+- `Failed to save/send RSI feed alert ... chat_id=562899945` -> `aiogram.exceptions.TelegramForbiddenError: bot was blocked by the user`
+
+**Интерпретация:**
+- Основной источник send-fail в текущем окне — blocked chats, а не внутренний сбой signal pipeline.
+- Для корректной оценки качества send-path нужно считать метрики отдельно:
+  - delivery to active chats
+  - expected fails on blocked chats.
+
+---
+## [2026-03-23 11:50:00] P1 активные чаты доставки (24h)
+**Команда (SQL):**
+- `scan_logs` с агрегацией `event='signal_sent'` по `chat_id`.
+
+**Факт:**
+- `790218266 -> sent_events=19, route_skipped_events=0`
+- `5164788770 -> sent_events=12, route_skipped_events=0`
+
+**Интерпретация:**
+- Доставка для активных чатов подтверждена и не упирается в route-skip.
+- send-fail по части чатов объясняется blocked status (TelegramForbidden), а не маршрутизацией.
 
 ---
 ## [2026-03-22 12:00:00] Запуск доказательного аудита (пошаговый режим)
@@ -2063,3 +2345,272 @@
 - `CUR` is listed in `.gitignore`.
 - Future updates will follow this structure.
 ---
+
+## [2026-03-23 14:35:00] Focus Shift: post-fix stabilization and quality calibration
+**Context:**
+- После закрытия `KeyError: 0` и восстановления отправки сигналов, фокус смещен с аварийного восстановления на контроль качества потока.
+
+**Current Audit Objectives:**
+1. Проверить стабильность рантайма (нет ли новых критичных traceback/crash-loop).
+2. Подтвердить регулярный поток сигналов (без длительной тишины и без залипания).
+3. Локализовать текущий bottleneck по reject-причинам.
+4. Объяснить перекос в strategy-сигналы и его допустимость.
+5. Принять решение о калибровке (пороги/лимиты/доля strategy).
+
+**Execution Mode:**
+- Пошагово, командами с интерпретацией каждого вывода.
+- Доказательный формат (`ФАКТ / ГИПОТЕЗА / НЕ ХВАТАЕТ ДАННЫХ`).
+
+**Immediate Next Checkpoint:**
+- Снять свежий 60-минутный health snapshot:
+  - `KeyError/Traceback` частота,
+  - наличие `decision_trace signal_sent`,
+  - жизненность всех `signal_worker` реплик.
+
+## [2026-03-23 14:45:00] Health snapshot (partial evidence, 60m)
+**Evidence received:**
+- `docker compose ps signal_worker`:
+  - `signal_worker-1..4` -> `Up 2 hours`.
+- `keyerror_count_60m`:
+  - `0`.
+
+**Classification:**
+- `ФАКТ`: критичный инцидент `KeyError: 0` не повторяется в окне 60 минут.
+- `ФАКТ`: воркеры в рабочем состоянии (4/4 up).
+- `НЕ ХВАТАЕТ ДАННЫХ`: для завершения health snapshot нужны еще:
+  - `traceback_count_60m`,
+  - `signal_sent_count_60m`.
+
+## [2026-03-23 14:52:00] Health snapshot update: traceback noise identified
+**New evidence:**
+- `traceback_count_60m: 77`.
+- `signal_sent_count_60m`: not captured in pasted output.
+
+**Assessment:**
+- `ФАКТ`: отсутствует возврат к `KeyError: 0`, но наблюдается высокий объем traceback-событий.
+- `ГИПОТЕЗА`: основная масса traceback вероятно приходится на операционные/data-quality случаи, а не на crash-loop.
+- `НЕ ХВАТАЕТ ДАННЫХ`: нужна классификация traceback по типам исключений и независимый сигнал-count из БД за 60m.
+
+## [2026-03-23 14:58:00] Throughput confirmation vs traceback ambiguity
+**Evidence received:**
+- DB metric (`signals`, last 60m): `sent_60m = 131`.
+- Targeted exception grep (`TelegramForbiddenError|BinanceCandlesError|KeyError: 0`): no matches in output.
+
+**Classification:**
+- `ФАКТ`: система отправляет сигналы регулярно (высокий throughput, 131/60m).
+- `ФАКТ`: прежний симптом "1-2 сигнала и тишина" на текущем срезе не подтверждается.
+- `НЕ ХВАТАЕТ ДАННЫХ`: происхождение `traceback_count_60m=77` пока не локализовано по классам исключений (нужен общий exception census).
+
+## [2026-03-23 15:06:00] Exception census complete (60m)
+**Evidence:**
+- Exception classes:
+  - `TelegramForbiddenError: 65`
+  - `BinanceCandlesError: 12`
+- Sample tracebacks confirm:
+  - `Forbidden: bot was blocked by the user`
+  - `Not enough bars for NCCOCOFFEE2USD/USDT 15m`
+- Throughput baseline already measured:
+  - `sent_60m = 131` (from DB `signals`).
+
+**Classification:**
+- `ФАКТ`: runtime noise is dominated by operational/user-level delivery blocks (`TelegramForbiddenError`), not by parser/runtime crash-loop.
+- `ФАКТ`: secondary noise source is symbol-specific market data insufficiency (`Not enough bars`).
+- `ФАКТ`: current system state = stable and productive (signals continue to be generated/sent).
+
+**Operational implication:**
+- Не аварийный инцидент, а наблюдаемая эксплуатационная нагрузка логов.
+- Следующий фокус: reject bottleneck + strategy/feed balance in last 60m.
+
+## [2026-03-23 15:14:00] 60m bottleneck and balance snapshot
+**Evidence (DB query, last 60 minutes):**
+- `raw_candidates`:
+  - `found=6096`
+  - `accepted=71`
+  - `rejected=6025`
+- `signals`:
+  - `sent_total=136`
+  - `sent_strategy=106`
+  - `sent_feed=30`
+- Top reject reasons:
+  - `reject_no_strategy_setup=3008`
+  - `reject_price_trigger=2980`
+  - `reject_user_min_move=14`
+  - `cooldown=7`
+  - `duplicate=7`
+  - `reject_rsi_filter=5`
+  - `stale_repeat=4`
+
+**Classification:**
+- `ФАКТ`: pipeline is stable and productive (regular sends continue).
+- `ФАКТ`: main reject bottleneck is split almost equally between:
+  - missing strategy setup match,
+  - feed price trigger miss.
+- `ФАКТ`: anti-spam filters are not the dominant suppressor in the current window.
+- `ФАКТ`: strategy share in delivered signals is high (`106/136 = 77.94%`).
+
+**Interpretation:**
+- Current state is not outage; it is a calibration state.
+- If product target is lower strategy dominance, tuning should focus on strategy sensitivity/quotas rather than crash recovery.
+
+## [2026-03-23 15:40:00] Implementation pass #1: strategy controllability via user settings
+**Why:**
+- Приоритет от пользователя: сначала сделать strategy полностью управляемой через `user-settings` и доказуемой через trace.
+
+**What changed (code-level):**
+- `app/core/config.py`
+  - Added defaults:
+    - `signal_strategy_impulse_window`
+    - `signal_strategy_deviation_threshold_pct`
+    - `signal_strategy_min_pinbar_strength`
+    - `signal_strategy_max_body_ratio`
+    - `signal_strategy_max_signals_per_cycle`
+- `app/db/models.py` + `app/db/init.py`
+  - Added persisted per-chat strategy columns in `user_signal_settings` with backfill defaults.
+- `app/services/user_settings.py`
+  - Extended `EffectiveUserSettings` with strategy controls and clamps.
+  - `get_effective_settings` and `upsert_user_settings` now resolve/store strategy parameters.
+- `app/api/schemas.py` + `app/api/router.py` + `app/bot/api_client.py`
+  - `/user-settings` now exposes strategy controls in read/write contract.
+- `app/services/strategy_engine.py`
+  - `max_body_ratio` now configurable arg (no hardcoded `0.35` lock).
+- `app/workers/mock_signal_worker.py`
+  - Strategy detection now uses per-chat effective settings (not only engine defaults).
+  - Added `strategy_settings_trace ...` log with applied parameters and settings metadata.
+  - Added per-chat `strategy_max_signals_per_cycle` gate.
+
+**Expected result:**
+- Изменение strategy-параметров пользователя должно изменять decisions (`accept/reject`) в strategy path.
+- Applied parameters должны быть видны в trace (`strategy_settings_trace`) для доказательной проверки.
+
+**Validation additions:**
+- `tests/test_user_settings.py` updated for new defaults.
+- `tests/test_strategy_engine.py` added to prove `max_body_ratio` changes trigger behavior.
+
+## [2026-03-23 16:05:00] Server-side verification gap detected
+**Observed on server:**
+- `/user-settings?chat_id=...` returns strategy tuning fields as `null`.
+- POST with new strategy fields does not change settings metadata for tested chat IDs.
+
+**Conclusion:**
+- `ФАКТ`: runtime on server is still on old API/worker contract (or not rebuilt from the new revision).
+- `ФАКТ`: strategy controllability feature is implemented locally but not yet active in production runtime.
+
+**Next mandatory step:**
+- Deploy latest revision (pull + rebuild/recreate at least `api` and `signal_worker`, preferably also `bot`) and re-run contract checks.
+
+## [2026-03-23 16:20:00] Deployment diagnosis: rebuilt image from old commit
+**Server evidence:**
+- Repo HEAD on server: `0e574e4`.
+- `git pull`: `Already up to date`.
+- Container source probe:
+  - `schemas.py` does not contain:
+    - `strategy_impulse_window`
+    - `strategy_deviation_threshold_pct`
+    - `strategy_max_signals_per_cycle`
+
+**Final classification:**
+- `ФАКТ`: runtime rebuild succeeded technically, but from an outdated revision.
+- `ФАКТ`: missing functionality is due to git delivery gap (local changes not yet on remote branch).
+
+**Action required next:**
+1. Commit and push current local strategy-settings changes to remote.
+2. On server: `git pull` -> should move beyond `0e574e4`.
+3. Rebuild/recreate `api`, `bot`, `signal_worker`.
+4. Re-run `/user-settings` and trace validation.
+
+## [2026-03-23 16:45:00] Production proof: strategy settings are now controllable and effective
+**Evidence:**
+- API container includes new schema fields (`strategy_impulse_window`, `strategy_deviation_threshold_pct`, `strategy_max_signals_per_cycle` -> `True`).
+- `/user-settings` returns non-null strategy fields.
+- Per-chat updates accepted and persisted (`settings_version`/`settings_updated_at` changed).
+- 60m SQL comparison (`mode='strategy'`):
+  - `chat_id=790218266` (soft profile): `accept=28`, `reject_no_strategy_setup=499`.
+  - `chat_id=5164788770` (strict profile): `accept=4`, `reject_no_strategy_setup=547`.
+
+**Classification:**
+- `ФАКТ`: strategy behavior is now user-configurable and affects signal decisions in production.
+- `ФАКТ`: strict strategy profile materially reduces accepted strategy signals.
+- `ГИПОТЕЗА`: current "no signals" complaint for strict chat is due to chosen thresholds, not system outage.
+
+**Next tuning direction:**
+- For chat-level recovery of signal flow, loosen strict parameters first (deviation/strength/body-ratio and max per cycle) before changing global engine behavior.
+
+## [2026-03-23 16:55:00] Immediate no-signal incident check (chat_id=5164788770)
+**Evidence from latest run:**
+- Settings status:
+  - `feed_mode_enabled=true`
+  - `strategy_mode_enabled=true`
+  - `rsi_enabled=false`
+- Strategy profile was softened from strict to moderate (`6.0/2.8/0.22/4` -> `4.8/2.2/0.30/12`).
+- `raw_candidates` (`mode='strategy'`, 30m window):
+  - `reject_no_strategy_setup=95`
+  - no accepts.
+
+**Classification:**
+- `ФАКТ`: strategy branch currently produces only `no_strategy_setup` for this chat/time window.
+- `ФАКТ`: this is not a crash-loop recurrence.
+- `НЕ ХВАТАЕТ ДАННЫХ`: feed branch state for same chat (reject/accept/sent) is still unknown and must be checked before further tuning.
+
+## [2026-03-23 17:02:00] Shell execution mishap during diagnostics
+**Observed:**
+- Prompt text (`root@...#`) was pasted into command line and interpreted as command tokens.
+- Resulted in noisy `command not found` output unrelated to system behavior.
+
+**Impact:**
+- No new diagnostic signal data was produced from the failed paste.
+- Strategy-only evidence remains valid; feed-path diagnostics still pending.
+
+## [2026-03-23 17:10:00] Chat-level no-signal root cause confirmed
+**Evidence (chat_id=5164788770, last 30m):**
+- `raw_candidates`:
+  - `feed -> reject_price_trigger = 100`
+  - `strategy -> reject_no_strategy_setup = 95`
+- `signals` table check with `chat_id` failed:
+  - `ERROR: column "chat_id" does not exist`
+
+**Classification:**
+- `ФАКТ`: both branches reject early; no accepted pipeline path in the observed 30m window.
+- `ФАКТ`: chat-level delivery metric must be taken from `scan_logs(event='signal_sent')`, not `signals`.
+- `ГИПОТЕЗА`: immediate recovery requires softening feed trigger (`min_price_move_pct`) and strategy strictness simultaneously for this chat.
+
+## [2026-03-24 20:10:00] Runbook: stable snapshot + backup before next tuning
+**Why:**
+- Перед любыми новыми изменениями фиксируем текущее рабочее состояние как rollback-point.
+- Критично сохранить фактические runtime-конфиги (`.env`, compose state, worker scale/shards, user settings) в одном артефакте.
+
+**Execution policy:**
+1. Сначала read-only snapshot и backup.
+2. Затем health-check после перехода на 700 universe.
+3. Только после этого — точечная калибровка порогов.
+
+**What must be captured in snapshot:**
+- `.env` ключи: `FEED_UNIVERSE_SIZE`, `WORKER_SHARD_COUNT`, `SIGNAL_*` strategy/feed thresholds.
+- `docker compose ps` для `api/bot/signal_worker`.
+- shard telemetry: `RSI worker shard setup`, `runtime_state`.
+- per-chat effective settings для тестовых chat_id.
+- 30-60m SQL срезы по `raw_candidates` + `scan_logs(event='signal_sent')`.
+
+## [2026-03-24 20:35:00] P0/P1 implementation started (no complex context filters)
+**Scope locked by user constraints:**
+- Не внедряем сложные фильтры ликвидности/volume/context.
+- Делаем только управляемость/стабилизацию и наблюдаемость.
+
+**Changes in progress:**
+1. Strategy side-mode enforcement:
+   - В strategy-ветке добавлен явный reject по `signal_side_mode` (`reject_side_mode`), чтобы "только dump"/"только pump" применялось и к strategy.
+2. Unified anti-duplicate memory for strategy:
+   - Strategy прогоняется через общий filter-key `signal_type="strategy"` (redis-backed через `SignalFilterEngine`), чтобы cooldown/dedup были одной сущностью для обоих направлений.
+   - Локальный process-only symbol cooldown убран из send path (исключаем несогласованность между воркерами).
+3. PINBAR confirmation (from `PINBAR.MD`):
+   - Добавлен confirmation шаг (третья свеча) с глобальным флагом `signal_strategy_require_confirmation=true`.
+4. UI contract fix:
+   - Feed card больше не показывает `Цена (close)`; отображается одна строка `Цена`, при наличии live — live, иначе fallback.
+
+**Expected effect:**
+- Меньше "ложных" strategy входов без подтверждения.
+- Нет обхода пользовательского side mode в strategy.
+- Уменьшение дублей между воркерами за счет единого redis состояния.
+- Чистый UI без двойной/противоречивой цены.
+
+**Critical next gate (before deploy):**
+- Обязательный snapshot+backup текущего прод-состояния (configs/runtime/sql slices) как rollback point.

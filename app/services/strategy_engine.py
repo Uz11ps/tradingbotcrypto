@@ -44,6 +44,7 @@ def detect_pinbar_strategy_signal(
     deviation_threshold_pct: float = 4.0,
     min_pinbar_strength: float = 2.0,
     max_body_ratio: float = 0.35,
+    require_confirmation: bool = True,
 ) -> StrategySignalCandidate | None:
     if len(bars) < max(impulse_window + 1, 20):
         return None
@@ -58,6 +59,8 @@ def detect_pinbar_strategy_signal(
     upper_wick, lower_wick, body_ratio = _pinbar_strength(pin_bar)
     body = max(1e-12, abs(pin_bar.close - pin_bar.open))
 
+    confirm_bar = bars[-1]
+
     # Short setup: strong upward impulse + bearish pin bar.
     if deviation_pct >= deviation_threshold_pct:
         strength = upper_wick / body
@@ -66,6 +69,11 @@ def detect_pinbar_strategy_signal(
             and pin_bar.close < pin_bar.open
             and body_ratio <= max_body_ratio
         )
+        if require_confirmation and is_bearish_pin:
+            is_bearish_pin = (
+                confirm_bar.close <= pin_bar.close
+                and confirm_bar.high <= pin_bar.high
+            )
         if is_bearish_pin:
             return StrategySignalCandidate(
                 symbol=symbol,
@@ -88,6 +96,11 @@ def detect_pinbar_strategy_signal(
             and pin_bar.close > pin_bar.open
             and body_ratio <= max_body_ratio
         )
+        if require_confirmation and is_bullish_pin:
+            is_bullish_pin = (
+                confirm_bar.close >= pin_bar.close
+                and confirm_bar.low >= pin_bar.low
+            )
         if is_bullish_pin:
             return StrategySignalCandidate(
                 symbol=symbol,

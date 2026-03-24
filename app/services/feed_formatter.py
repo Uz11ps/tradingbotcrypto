@@ -27,14 +27,13 @@ def _fmt_volume(vol: float) -> str:
 def format_signal_card(candidate: RsiSignalCandidate, *, live_price: float | None = None) -> str:
     marker = "🟢" if candidate.signal_type == "pump" else "🔴"
     vol_str = _fmt_volume(candidate.quote_volume_24h)
-    live_line = ""
+    display_price = candidate.current_price
     if live_price is not None and live_price > 0:
-        live_line = f"Live: {_smart_price(live_price)}\n"
+        display_price = live_price
     return (
         f"{marker} {candidate.symbol}\n"
         f"Движение: {candidate.pct_change:+.1f}%\n"
-        f"Цена (close): {_smart_price(candidate.current_price)}\n"
-        f"{live_line}"
+        f"Цена: {_smart_price(display_price)}\n"
         f"RSI: {candidate.rsi_value:.1f}\n"
         f"Объём 24ч: {vol_str}"
     )

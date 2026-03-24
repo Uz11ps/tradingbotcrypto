@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     signal_strategy_deviation_threshold_pct: float = 4.0
     signal_strategy_min_pinbar_strength: float = 2.0
     signal_strategy_max_body_ratio: float = 0.35
+    signal_strategy_require_confirmation: bool = True
     signal_strategy_max_signals_per_cycle: int = 20
     signal_strategy_symbol_cooldown_seconds: int = 1800
     signal_filter_redis_prefix: str = "signal_filter"

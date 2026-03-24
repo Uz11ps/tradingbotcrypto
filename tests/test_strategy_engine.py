@@ -26,7 +26,8 @@ def test_strategy_respects_max_body_ratio() -> None:
     # Pin-like bearish bar with body_ratio=0.25 and strength=2.0.
     # It should pass at 0.35 and fail at 0.20 max_body_ratio.
     bars.append(_bar(i=18, open_=119.0, high=121.0, low=117.0, close=118.0))
-    bars.append(_bar(i=19, open_=120.0, high=121.0, low=119.0, close=120.0))
+    # Confirmation bar for short: closes below pin close and does not break pin high.
+    bars.append(_bar(i=19, open_=118.0, high=120.0, low=116.0, close=117.0))
 
     loose = detect_pinbar_strategy_signal(
         symbol="TEST/USDT",
@@ -53,3 +54,35 @@ def test_strategy_respects_max_body_ratio() -> None:
 
     assert loose is not None
     assert strict is None
+
+
+def test_strategy_confirmation_toggle() -> None:
+    bars: list[KlineBar] = []
+    for i in range(18):
+        base = 100.0 + i
+        bars.append(_bar(i=i, open_=base, high=base + 1.0, low=base - 1.0, close=base + 1.0))
+
+    # Bearish pin bar.
+    bars.append(_bar(i=18, open_=119.0, high=121.0, low=117.0, close=118.0))
+    # Non-confirming bar for short: closes above pin close.
+    bars.append(_bar(i=19, open_=118.0, high=120.0, low=117.0, close=119.0))
+
+    with_confirmation = detect_pinbar_strategy_signal(
+        symbol="TEST/USDT",
+        timeframe="15m",
+        bars=bars,
+        generated_at=datetime.now(tz=UTC),
+        market_type="spot",
+        require_confirmation=True,
+    )
+    without_confirmation = detect_pinbar_strategy_signal(
+        symbol="TEST/USDT",
+        timeframe="15m",
+        bars=bars,
+        generated_at=datetime.now(tz=UTC),
+        market_type="spot",
+        require_confirmation=False,
+    )
+
+    assert with_confirmation is None
+    assert without_confirmation is not None
