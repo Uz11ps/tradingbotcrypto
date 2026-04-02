@@ -11,16 +11,16 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 import httpx
-from aiogram import Bot
 from redis.asyncio import Redis
 
 from app.bot.keyboards import bottom_chat_menu_kb
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.core.telegram import build_telegram_bot
 from app.services.binance_candles import (
     BinanceCandlesError,
 )
-from app.services.binance_universe import BinanceUniverseError
+from app.services.binance_universe import BinanceUniverseError, fetch_top_symbols_by_volume
 from app.services.feed_formatter import format_signal_card, format_strategy_signal_card
 from app.services.live_ingest import LiveShadowIngestor
 from app.services.market_provider import MarketProviderRouter
@@ -54,6 +54,10 @@ class _ShadowTarget:
 @dataclass(slots=True)
 class _ShadowRuntime:
     target: _ShadowTarget
+    chunk_index: int
+    chunks_total: int
+    symbols_count: int
+    total_symbols: int
     cache: MarketStateCache
     ingestor: LiveShadowIngestor
     stop_event: asyncio.Event
@@ -279,6 +283,44 @@ def _parse_shadow_targets(raw: str, *, fallback_ws_url: str) -> list[_ShadowTarg
     return parsed
 
 
+async def _resolve_shadow_symbols() -> list[str]:
+    explicit_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
+    if explicit_symbols:
+        log.info("Shadow ingest symbol source: explicit list count=%d", len(explicit_symbols))
+        return explicit_symbols
+
+    requested_size = int(settings.signal_live_shadow_universe_size)
+    top_n = requested_size if requested_size > 0 else 5000
+    universe = await fetch_top_symbols_by_volume(
+        quote_asset=settings.bingx_quote_asset,
+        top_n=top_n,
+        min_quote_volume_24h=0.0,
+        market_type="spot",
+    )
+    symbols = universe.symbols
+    if requested_size > 0:
+        symbols = symbols[:requested_size]
+    log.info(
+        "Shadow ingest symbol source: auto-universe count=%d requested_size=%d",
+        len(symbols),
+        requested_size,
+    )
+    return symbols
+
+
+def _shadow_chunk_size_for_exchange(exchange: str) -> int:
+    normalized = (exchange or "").strip().lower()
+    if normalized == "mexc":
+        return max(1, int(settings.signal_live_shadow_chunk_size_mexc))
+    return max(1, int(settings.signal_live_shadow_chunk_size_bingx))
+
+
+def _chunk_symbols(symbols: list[str], *, chunk_size: int) -> list[list[str]]:
+    if not symbols:
+        return []
+    return [symbols[idx : idx + chunk_size] for idx in range(0, len(symbols), chunk_size)]
+
+
 def _start_shadow_runtimes(
     *,
     symbols: list[str],
@@ -286,34 +328,44 @@ def _start_shadow_runtimes(
 ) -> list[_ShadowRuntime]:
     runtimes: list[_ShadowRuntime] = []
     for target in targets:
-        cache = MarketStateCache(
-            ttl_seconds=max(30, settings.worker_interval_seconds * 12),
-            max_points_per_symbol=1200,
-            max_symbols=max(100, len(symbols) * 4),
+        symbol_chunks = _chunk_symbols(
+            symbols,
+            chunk_size=_shadow_chunk_size_for_exchange(target.exchange),
         )
-        ingestor = LiveShadowIngestor(
-            cache=cache,
-            symbols=symbols,
-            ws_url=target.ws_url,
-            exchange=target.exchange,
-            reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
-            reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
-            reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
-        )
-        stop_event = asyncio.Event()
-        task = asyncio.create_task(
-            ingestor.run(stop_event=stop_event),
-            name=f"live-shadow-ingest-{target.exchange}",
-        )
-        runtimes.append(
-            _ShadowRuntime(
-                target=target,
-                cache=cache,
-                ingestor=ingestor,
-                stop_event=stop_event,
-                task=task,
+        chunks_total = len(symbol_chunks)
+        for chunk_index, chunk_symbols in enumerate(symbol_chunks, start=1):
+            cache = MarketStateCache(
+                ttl_seconds=max(30, settings.worker_interval_seconds * 12),
+                max_points_per_symbol=1200,
+                max_symbols=max(100, len(chunk_symbols) * 4),
             )
-        )
+            ingestor = LiveShadowIngestor(
+                cache=cache,
+                symbols=chunk_symbols,
+                ws_url=target.ws_url,
+                exchange=target.exchange,
+                reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+                reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
+                reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
+            )
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(
+                ingestor.run(stop_event=stop_event),
+                name=f"live-shadow-ingest-{target.exchange}-{chunk_index}",
+            )
+            runtimes.append(
+                _ShadowRuntime(
+                    target=target,
+                    chunk_index=chunk_index,
+                    chunks_total=chunks_total,
+                    symbols_count=len(chunk_symbols),
+                    total_symbols=len(symbols),
+                    cache=cache,
+                    ingestor=ingestor,
+                    stop_event=stop_event,
+                    task=task,
+                )
+            )
     return runtimes
 
 
@@ -1346,7 +1398,7 @@ async def main() -> None:
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is empty")
 
-    bot = Bot(token=settings.telegram_bot_token)
+    bot = build_telegram_bot()
     client = httpx.AsyncClient(base_url=settings.api_public_base_url, timeout=15.0)
     filters = SignalFilterEngine(
         cooldown_seconds=settings.worker_feed_cooldown_seconds,
@@ -1377,7 +1429,7 @@ async def main() -> None:
     ingest_lease: _RedisLeaseGuard | None = None
     ingest_lease_state = _LeaseState()
     shadow_runtimes: list[_ShadowRuntime] = []
-    shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
+    shadow_symbols: list[str] = []
     shadow_targets = _parse_shadow_targets(
         settings.signal_live_exchange_targets,
         fallback_ws_url=settings.signal_live_ws_url,
@@ -1445,13 +1497,24 @@ async def main() -> None:
         ingest_lease is None and shard_index == 0
     )
     if shadow_should_run:
+        try:
+            shadow_symbols = await _resolve_shadow_symbols()
+        except Exception:
+            log.exception("Failed to resolve shadow ingest symbols")
+            shadow_symbols = []
         shadow_runtimes = _start_shadow_runtimes(symbols=shadow_symbols, targets=shadow_targets)
         for runtime in shadow_runtimes:
             log.info(
-                "Shadow live ingest started: exchange=%s ws_url=%s symbols=%d",
+                (
+                    "Shadow live ingest started: exchange=%s ws_url=%s "
+                    "chunk=%d/%d symbols=%d total_symbols=%d"
+                ),
                 runtime.target.exchange,
                 runtime.target.ws_url,
-                len(shadow_symbols),
+                runtime.chunk_index,
+                runtime.chunks_total,
+                runtime.symbols_count,
+                runtime.total_symbols,
             )
     elif settings.signal_shadow_mode_enabled and not shadow_targets:
         log.warning("Shadow live ingest enabled, but no exchange targets configured")
@@ -1520,14 +1583,25 @@ async def main() -> None:
                 if is_owner_now and not ingest_lease_state.acquired_once:
                     ingest_lease_state.acquired_once = True
                 if is_owner_now and not shadow_runtimes and shadow_targets:
+                    try:
+                        shadow_symbols = await _resolve_shadow_symbols()
+                    except Exception:
+                        log.exception("Failed to resolve shadow ingest symbols")
+                        shadow_symbols = []
                     shadow_runtimes = _start_shadow_runtimes(symbols=shadow_symbols, targets=shadow_targets)
                     ingest_lease_state.is_owner = True
                     for runtime in shadow_runtimes:
                         log.info(
-                            "Shadow live ingest started by lease owner: exchange=%s ws_url=%s symbols=%d",
+                            (
+                                "Shadow live ingest started by lease owner: exchange=%s ws_url=%s "
+                                "chunk=%d/%d symbols=%d total_symbols=%d"
+                            ),
                             runtime.target.exchange,
                             runtime.target.ws_url,
-                            len(shadow_symbols),
+                            runtime.chunk_index,
+                            runtime.chunks_total,
+                            runtime.symbols_count,
+                            runtime.total_symbols,
                         )
                 elif (not is_owner_now) and shadow_runtimes:
                     ingest_lease_state.is_owner = False
@@ -1586,12 +1660,14 @@ async def main() -> None:
                     stats = runtime.ingestor.stats
                     log.info(
                         (
-                            "Shadow ingest stats: exchange=%s connected=%s attempts=%d reconnects=%d "
+                            "Shadow ingest stats: exchange=%s chunk=%d/%d connected=%s attempts=%d reconnects=%d "
                             "disconnects=%d timeouts=%d errors=%d decode_failures=%d "
                             "pongs_sent=%d subscriptions_sent=%d messages=%d updates=%d "
-                            "cache_age_ms=%d symbols=%d points=%d last_event_ts_ms=%d"
+                            "cache_age_ms=%d symbols=%d total_symbols=%d points=%d last_event_ts_ms=%d"
                         ),
                         runtime.target.exchange,
+                        runtime.chunk_index,
+                        runtime.chunks_total,
                         stats.connected,
                         stats.attempts_total,
                         stats.reconnects,
@@ -1604,7 +1680,8 @@ async def main() -> None:
                         stats.messages_total,
                         stats.updates_total,
                         stats.cache_age_ms,
-                        runtime.cache.symbols_count(),
+                        runtime.symbols_count,
+                        runtime.total_symbols,
                         runtime.cache.points_count(),
                         stats.last_event_ts_ms,
                     )

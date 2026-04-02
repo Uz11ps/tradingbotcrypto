@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.storage.memory import MemoryStorage
 
 try:
@@ -17,6 +18,7 @@ from app.bot.api_client import ApiClient
 from app.bot.handlers import router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.core.telegram import build_telegram_bot
 
 log = logging.getLogger("bot.main")
 
@@ -32,7 +34,7 @@ async def main() -> None:
     if not settings.telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is empty. Fill .env (see .env.example).")
 
-    bot = Bot(token=settings.telegram_bot_token)
+    bot = build_telegram_bot()
     dp = Dispatcher(storage=_build_storage())
 
     api = ApiClient()
@@ -41,7 +43,13 @@ async def main() -> None:
     dp.include_router(router)
 
     try:
-        await dp.start_polling(bot)
+        while True:
+            try:
+                await dp.start_polling(bot)
+                break
+            except TelegramNetworkError:
+                log.exception("Telegram API is unreachable, retrying polling startup")
+                await asyncio.sleep(max(1.0, settings.telegram_polling_start_retry_seconds))
     finally:
         await api.aclose()
         await bot.session.close()

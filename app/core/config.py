@@ -10,6 +10,9 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
     telegram_signals_chat_id: int = 0
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_http_proxy: str = ""
+    telegram_polling_start_retry_seconds: float = 5.0
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -89,7 +92,10 @@ class Settings(BaseSettings):
         "bingx|wss://open-api-ws.bingx.com/market,"
         "mexc|wss://contract.mexc.com/edge"
     )
-    signal_live_shadow_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT"
+    signal_live_shadow_symbols: str = ""
+    signal_live_shadow_universe_size: int = 0
+    signal_live_shadow_chunk_size_bingx: int = 120
+    signal_live_shadow_chunk_size_mexc: int = 80
     signal_live_ws_reconnect_seconds: float = 3.0
     signal_live_ws_reconnect_max_seconds: float = 20.0
     signal_live_ws_reconnect_jitter_seconds: float = 0.75
