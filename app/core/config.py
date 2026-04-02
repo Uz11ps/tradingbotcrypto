@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     signal_send_enabled: bool = True
     signal_contract_version: str = "v2"
     signal_live_ws_url: str = "wss://open-api-ws.bingx.com/market"
+    signal_live_exchange_targets: str = (
+        "bingx|wss://open-api-ws.bingx.com/market,"
+        "mexc|wss://contract.mexc.com/edge"
+    )
     signal_live_shadow_symbols: str = "BTC/USDT,ETH/USDT,SOL/USDT"
     signal_live_ws_reconnect_seconds: float = 3.0
     signal_live_ws_reconnect_max_seconds: float = 20.0

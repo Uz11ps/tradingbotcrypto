@@ -42,6 +42,7 @@ class MarketPricePoint:
 @dataclass(slots=True)
 class MarketStateSnapshot:
     symbol: str
+    exchange: str | None
     point: MarketPricePoint
     age_ms: int
     source: str
@@ -63,10 +64,29 @@ class MarketStateCache:
         self._points: dict[str, deque[MarketPricePoint]] = {}
         self._last_touch_monotonic: dict[str, float] = {}
 
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        return symbol.strip().upper()
+
+    @staticmethod
+    def _normalize_exchange(exchange: str | None) -> str | None:
+        if exchange is None:
+            return None
+        normalized = exchange.strip().lower()
+        return normalized or None
+
+    def _make_key(self, *, symbol: str, exchange: str | None) -> str:
+        normalized_symbol = self._normalize_symbol(symbol)
+        normalized_exchange = self._normalize_exchange(exchange)
+        if normalized_exchange is None:
+            return normalized_symbol
+        return f"{normalized_exchange}::{normalized_symbol}"
+
     def upsert(
         self,
         *,
         symbol: str,
+        exchange: str | None = None,
         exchange_event_ts_ms: int,
         received_ts_ms: int,
         last_trade: float | None = None,
@@ -84,17 +104,25 @@ class MarketStateCache:
         )
         if point.current_price is None:
             return
+        key = self._make_key(symbol=symbol, exchange=exchange)
         self._evict_symbols_if_needed()
-        buf = self._points.get(symbol)
+        buf = self._points.get(key)
         if buf is None:
             buf = deque(maxlen=self.max_points_per_symbol)
-            self._points[symbol] = buf
+            self._points[key] = buf
         buf.append(point)
-        self._last_touch_monotonic[symbol] = time()
-        self._cleanup_symbol(symbol=symbol, now_ms=received_ts_ms)
+        self._last_touch_monotonic[key] = time()
+        self._cleanup_symbol(key=key, now_ms=received_ts_ms)
 
-    def get_latest(self, *, symbol: str, now_ms: int | None = None) -> MarketStateSnapshot | None:
-        buf = self._points.get(symbol)
+    def get_latest(
+        self,
+        *,
+        symbol: str,
+        exchange: str | None = None,
+        now_ms: int | None = None,
+    ) -> MarketStateSnapshot | None:
+        key = self._make_key(symbol=symbol, exchange=exchange)
+        buf = self._points.get(key)
         if not buf:
             return None
         point = buf[-1]
@@ -103,18 +131,26 @@ class MarketStateCache:
         source = point.price_source
         if source is None:
             return None
-        return MarketStateSnapshot(symbol=symbol, point=point, age_ms=age_ms, source=source)
+        return MarketStateSnapshot(
+            symbol=self._normalize_symbol(symbol),
+            exchange=self._normalize_exchange(exchange),
+            point=point,
+            age_ms=age_ms,
+            source=source,
+        )
 
     def get_baseline_price(
         self,
         *,
         symbol: str,
+        exchange: str | None = None,
         window_seconds: int,
         now_ms: int,
     ) -> float | None:
         if window_seconds <= 0:
             return None
-        buf = self._points.get(symbol)
+        key = self._make_key(symbol=symbol, exchange=exchange)
+        buf = self._points.get(key)
         if not buf:
             return None
         min_ts = now_ms - (window_seconds * 1000)
@@ -125,13 +161,13 @@ class MarketStateCache:
 
     def cleanup(self, *, now_ms: int) -> None:
         stale_symbols: list[str] = []
-        for symbol in list(self._points.keys()):
-            self._cleanup_symbol(symbol=symbol, now_ms=now_ms)
-            if not self._points.get(symbol):
-                stale_symbols.append(symbol)
-        for symbol in stale_symbols:
-            self._points.pop(symbol, None)
-            self._last_touch_monotonic.pop(symbol, None)
+        for key in list(self._points.keys()):
+            self._cleanup_symbol(key=key, now_ms=now_ms)
+            if not self._points.get(key):
+                stale_symbols.append(key)
+        for key in stale_symbols:
+            self._points.pop(key, None)
+            self._last_touch_monotonic.pop(key, None)
 
     def symbols_count(self) -> int:
         return len(self._points)
@@ -139,8 +175,8 @@ class MarketStateCache:
     def points_count(self) -> int:
         return sum(len(buf) for buf in self._points.values())
 
-    def _cleanup_symbol(self, *, symbol: str, now_ms: int) -> None:
-        buf = self._points.get(symbol)
+    def _cleanup_symbol(self, *, key: str, now_ms: int) -> None:
+        buf = self._points.get(key)
         if not buf:
             return
         min_ts = now_ms - (self.ttl_seconds * 1000)

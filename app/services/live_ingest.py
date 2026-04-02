@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import gzip
 import json
 import logging
@@ -18,8 +19,32 @@ from app.services.market_state_cache import MarketStateCache
 log = logging.getLogger(__name__)
 
 
+def _normalize_exchange(exchange: str) -> str:
+    normalized = exchange.strip().lower()
+    if normalized not in {"bingx", "mexc"}:
+        raise ValueError(f"Unsupported live ingest exchange: {exchange}")
+    return normalized
+
+
 def _to_bingx_symbol(symbol: str) -> str:
     return symbol.replace("/", "-").replace("_", "-").upper()
+
+
+def _to_mexc_symbol(symbol: str) -> str:
+    return symbol.replace("/", "_").replace("-", "_").upper()
+
+
+def _to_cache_symbol(symbol: str) -> str:
+    normalized = symbol.strip().upper()
+    if "/" in normalized:
+        return normalized
+    if "-" in normalized:
+        base, quote = normalized.split("-", 1)
+        return f"{base}/{quote}"
+    if "_" in normalized:
+        base, quote = normalized.split("_", 1)
+        return f"{base}/{quote}"
+    return normalized
 
 
 @dataclass(slots=True)
@@ -47,6 +72,7 @@ class LiveShadowIngestor:
         cache: MarketStateCache,
         symbols: list[str],
         ws_url: str,
+        exchange: str = "bingx",
         reconnect_delay_seconds: float = 3.0,
         reconnect_max_delay_seconds: float = 20.0,
         reconnect_jitter_seconds: float = 0.75,
@@ -54,6 +80,7 @@ class LiveShadowIngestor:
         self.cache = cache
         self.symbols = [s for s in symbols if s]
         self.ws_url = ws_url.strip()
+        self.exchange = _normalize_exchange(exchange)
         self.reconnect_delay_seconds = max(0.5, reconnect_delay_seconds)
         self.reconnect_max_delay_seconds = max(
             self.reconnect_delay_seconds,
@@ -81,25 +108,37 @@ class LiveShadowIngestor:
                         attempt_streak = 0
                         self.stats.connected = True
                         await self._subscribe(ws)
-                        while not stop_event.is_set():
-                            event = await ws.receive(timeout=5.0)
-                            self.stats.messages_total += 1
-                            payload = self._decode_event(event)
-                            if payload is None:
-                                self.stats.decode_failures_total += 1
-                                continue
-                            self.stats.last_receive_ts_ms = int(time() * 1000)
-                            maybe_pong = self._extract_pong(payload)
-                            if maybe_pong is not None:
-                                await ws.send_json(maybe_pong)
-                                self.stats.pongs_sent_total += 1
-                                continue
-                            if self._apply_payload(payload, receive_ts_ms=self.stats.last_receive_ts_ms):
-                                self.stats.updates_total += 1
-                                self.stats.cache_age_ms = max(
-                                    0,
-                                    self.stats.last_receive_ts_ms - self.stats.last_event_ts_ms,
+                        ping_task: asyncio.Task[None] | None = None
+                        try:
+                            if self.exchange == "mexc":
+                                ping_task = asyncio.create_task(
+                                    self._ping_loop(ws, stop_event),
+                                    name=f"live-shadow-ping-{self.exchange}",
                                 )
+                            while not stop_event.is_set():
+                                event = await ws.receive(timeout=5.0)
+                                self.stats.messages_total += 1
+                                payload = self._decode_event(event)
+                                if payload is None:
+                                    self.stats.decode_failures_total += 1
+                                    continue
+                                self.stats.last_receive_ts_ms = int(time() * 1000)
+                                maybe_pong = self._extract_pong(payload)
+                                if maybe_pong is not None:
+                                    await ws.send_json(maybe_pong)
+                                    self.stats.pongs_sent_total += 1
+                                    continue
+                                if self._apply_payload(payload, receive_ts_ms=self.stats.last_receive_ts_ms):
+                                    self.stats.updates_total += 1
+                                    self.stats.cache_age_ms = max(
+                                        0,
+                                        self.stats.last_receive_ts_ms - self.stats.last_event_ts_ms,
+                                    )
+                        finally:
+                            if ping_task is not None:
+                                ping_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await ping_task
                 except TimeoutError:
                     # Normal idle wait branch.
                     self.stats.timeouts_total += 1
@@ -120,21 +159,47 @@ class LiveShadowIngestor:
 
     async def _subscribe(self, ws: Any) -> None:
         for symbol in self.symbols:
-            pair = _to_bingx_symbol(symbol)
-            # BingX market channels are dataType based.
+            if self.exchange == "bingx":
+                pair = _to_bingx_symbol(symbol)
+                await ws.send_json(
+                    {
+                        "id": f"trade-{pair}",
+                        "reqType": "sub",
+                        "dataType": f"{pair}@trade",
+                    }
+                )
+                self.stats.subscriptions_sent_total += 1
+                await ws.send_json(
+                    {
+                        "id": f"depth-{pair}",
+                        "reqType": "sub",
+                        "dataType": f"{pair}@depth5",
+                    }
+                )
+                self.stats.subscriptions_sent_total += 1
+                continue
+            pair = _to_mexc_symbol(symbol)
             await ws.send_json(
                 {
-                    "id": f"trade-{pair}",
-                    "reqType": "sub",
-                    "dataType": f"{pair}@trade",
+                    "method": "sub.ticker",
+                    "param": {"symbol": pair},
+                    "gzip": False,
                 }
             )
             self.stats.subscriptions_sent_total += 1
             await ws.send_json(
                 {
-                    "id": f"depth-{pair}",
-                    "reqType": "sub",
-                    "dataType": f"{pair}@depth5",
+                    "method": "sub.deal",
+                    "param": {"symbol": pair},
+                    "gzip": False,
+                }
+            )
+            self.stats.subscriptions_sent_total += 1
+            await ws.send_json(
+                {
+                    "method": "sub.depth",
+                    "param": {"symbol": pair},
+                    "gzip": False,
                 }
             )
             self.stats.subscriptions_sent_total += 1
@@ -144,6 +209,13 @@ class LiveShadowIngestor:
         started = time()
         while not stop_event.is_set() and (time() - started) < seconds:
             await asyncio.sleep(0.2)
+
+    async def _ping_loop(self, ws: Any, stop_event: Any) -> None:
+        while not stop_event.is_set():
+            await asyncio.sleep(15.0)
+            if stop_event.is_set():
+                return
+            await ws.send_json({"method": "ping"})
 
     def _next_reconnect_delay(self, attempt_streak: int) -> float:
         base = self.reconnect_delay_seconds * (2 ** max(0, attempt_streak - 1))
@@ -185,6 +257,11 @@ class LiveShadowIngestor:
         return None
 
     def _apply_payload(self, payload: dict[str, Any], *, receive_ts_ms: int) -> bool:
+        if self.exchange == "mexc":
+            return self._apply_mexc_payload(payload, receive_ts_ms=receive_ts_ms)
+        return self._apply_bingx_payload(payload, receive_ts_ms=receive_ts_ms)
+
+    def _apply_bingx_payload(self, payload: dict[str, Any], *, receive_ts_ms: int) -> bool:
         data = payload.get("data")
         row: dict[str, Any] | None = None
         if isinstance(data, dict):
@@ -202,7 +279,7 @@ class LiveShadowIngestor:
                 symbol = channel.split("@", 1)[0]
         if not symbol:
             return False
-        symbol = symbol.replace("-", "/").upper()
+        symbol = _to_cache_symbol(symbol)
         event_ts_ms = int(
             row.get("E")
             or row.get("T")
@@ -222,6 +299,67 @@ class LiveShadowIngestor:
         best_ask = _to_float(row.get("bestAsk") or row.get("askPrice") or row.get("a") or row.get("ask"))
         self.cache.upsert(
             symbol=symbol,
+            exchange=self.exchange,
+            exchange_event_ts_ms=event_ts_ms,
+            received_ts_ms=receive_ts_ms,
+            last_trade=last_trade,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+        self.stats.last_event_ts_ms = event_ts_ms
+        return True
+
+    def _apply_mexc_payload(self, payload: dict[str, Any], *, receive_ts_ms: int) -> bool:
+        channel = str(payload.get("channel") or "").lower()
+        if not channel or channel == "pong":
+            return False
+        symbol = _to_cache_symbol(str(payload.get("symbol") or ""))
+        if not symbol:
+            data = payload.get("data")
+            if isinstance(data, dict):
+                symbol = _to_cache_symbol(str(data.get("symbol") or ""))
+        if not symbol:
+            return False
+
+        row = payload.get("data")
+        event_ts_ms = int(payload.get("ts") or receive_ts_ms)
+        last_trade: float | None = None
+        best_bid: float | None = None
+        best_ask: float | None = None
+
+        if channel == "push.ticker" and isinstance(row, dict):
+            event_ts_ms = int(row.get("timestamp") or payload.get("ts") or receive_ts_ms)
+            last_trade = _to_float(row.get("lastPrice"))
+            best_bid = _to_float(row.get("bid1"))
+            best_ask = _to_float(row.get("ask1"))
+        elif channel == "push.deal" and isinstance(row, list):
+            latest_trade = max(
+                (item for item in row if isinstance(item, dict)),
+                key=lambda item: int(item.get("t") or payload.get("ts") or 0),
+                default=None,
+            )
+            if latest_trade is None:
+                return False
+            event_ts_ms = int(latest_trade.get("t") or payload.get("ts") or receive_ts_ms)
+            last_trade = _to_float(latest_trade.get("p"))
+        elif channel == "push.depth" and isinstance(row, dict):
+            event_ts_ms = int(payload.get("ts") or receive_ts_ms)
+            bids = row.get("bids")
+            asks = row.get("asks")
+            if isinstance(bids, list) and bids:
+                first_bid = bids[0]
+                if isinstance(first_bid, list) and first_bid:
+                    best_bid = _to_float(first_bid[0])
+            if isinstance(asks, list) and asks:
+                first_ask = asks[0]
+                if isinstance(first_ask, list) and first_ask:
+                    best_ask = _to_float(first_ask[0])
+        else:
+            return False
+
+        self.cache.upsert(
+            symbol=symbol,
+            exchange=self.exchange,
             exchange_event_ts_ms=event_ts_ms,
             received_ts_ms=receive_ts_ms,
             last_trade=last_trade,

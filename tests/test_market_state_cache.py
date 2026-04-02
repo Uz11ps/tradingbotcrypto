@@ -68,3 +68,27 @@ def test_evicts_oldest_symbol_when_symbol_cap_reached() -> None:
     )
     assert cache.get_latest(symbol="BTC/USDT") is None
     assert cache.get_latest(symbol="ETH/USDT") is not None
+
+
+def test_keeps_same_symbol_separate_by_exchange() -> None:
+    cache = MarketStateCache(ttl_seconds=120, max_points_per_symbol=10, max_symbols=10)
+    cache.upsert(
+        symbol="BTC/USDT",
+        exchange="bingx",
+        exchange_event_ts_ms=1000,
+        received_ts_ms=1000,
+        last_trade=100.0,
+    )
+    cache.upsert(
+        symbol="BTC/USDT",
+        exchange="mexc",
+        exchange_event_ts_ms=2000,
+        received_ts_ms=2000,
+        last_trade=200.0,
+    )
+    bingx_latest = cache.get_latest(symbol="BTC/USDT", exchange="bingx")
+    mexc_latest = cache.get_latest(symbol="BTC/USDT", exchange="mexc")
+    assert bingx_latest is not None
+    assert mexc_latest is not None
+    assert bingx_latest.point.current_price == 100.0
+    assert mexc_latest.point.current_price == 200.0

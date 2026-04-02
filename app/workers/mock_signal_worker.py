@@ -45,6 +45,21 @@ class _FilterProxy:
     rsi_value: float = 0.0
 
 
+@dataclass(slots=True)
+class _ShadowTarget:
+    exchange: str
+    ws_url: str
+
+
+@dataclass(slots=True)
+class _ShadowRuntime:
+    target: _ShadowTarget
+    cache: MarketStateCache
+    ingestor: LiveShadowIngestor
+    stop_event: asyncio.Event
+    task: asyncio.Task[None]
+
+
 def _select_shard_symbols(symbols: list[str], *, shard_index: int, shard_count: int) -> list[str]:
     ordered = sorted(symbols)
     return [symbol for i, symbol in enumerate(ordered) if i % shard_count == shard_index]
@@ -234,6 +249,82 @@ def _pct_change(prev_value: float, current_value: float) -> float:
 
 def _parse_shadow_symbols(raw: str) -> list[str]:
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
+def _parse_shadow_targets(raw: str, *, fallback_ws_url: str) -> list[_ShadowTarget]:
+    parsed: list[_ShadowTarget] = []
+    seen: set[tuple[str, str]] = set()
+    chunks = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    if not chunks and fallback_ws_url.strip():
+        chunks = [f"bingx|{fallback_ws_url.strip()}"]
+    for chunk in chunks:
+        exchange = "bingx"
+        ws_url = chunk
+        if "|" in chunk:
+            exchange, ws_url = chunk.split("|", 1)
+        normalized_exchange = exchange.strip().lower()
+        normalized_ws_url = ws_url.strip()
+        if not normalized_exchange or not normalized_ws_url:
+            continue
+        dedupe_key = (normalized_exchange, normalized_ws_url)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        parsed.append(
+            _ShadowTarget(
+                exchange=normalized_exchange,
+                ws_url=normalized_ws_url,
+            )
+        )
+    return parsed
+
+
+def _start_shadow_runtimes(
+    *,
+    symbols: list[str],
+    targets: list[_ShadowTarget],
+) -> list[_ShadowRuntime]:
+    runtimes: list[_ShadowRuntime] = []
+    for target in targets:
+        cache = MarketStateCache(
+            ttl_seconds=max(30, settings.worker_interval_seconds * 12),
+            max_points_per_symbol=1200,
+            max_symbols=max(100, len(symbols) * 4),
+        )
+        ingestor = LiveShadowIngestor(
+            cache=cache,
+            symbols=symbols,
+            ws_url=target.ws_url,
+            exchange=target.exchange,
+            reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
+            reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
+            reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
+        )
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            ingestor.run(stop_event=stop_event),
+            name=f"live-shadow-ingest-{target.exchange}",
+        )
+        runtimes.append(
+            _ShadowRuntime(
+                target=target,
+                cache=cache,
+                ingestor=ingestor,
+                stop_event=stop_event,
+                task=task,
+            )
+        )
+    return runtimes
+
+
+async def _stop_shadow_runtimes(runtimes: list[_ShadowRuntime]) -> None:
+    for runtime in runtimes:
+        runtime.stop_event.set()
+    for runtime in runtimes:
+        runtime.task.cancel()
+    for runtime in runtimes:
+        with suppress(asyncio.CancelledError):
+            await runtime.task
 
 
 def _chat_symbol_window(
@@ -1285,11 +1376,12 @@ async def main() -> None:
     shard_slot_guard: _RedisShardSlotGuard | None = None
     ingest_lease: _RedisLeaseGuard | None = None
     ingest_lease_state = _LeaseState()
-    shadow_cache: MarketStateCache | None = None
-    shadow_ingestor: LiveShadowIngestor | None = None
-    shadow_stop_event: asyncio.Event | None = None
-    shadow_task: asyncio.Task[None] | None = None
+    shadow_runtimes: list[_ShadowRuntime] = []
     shadow_symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
+    shadow_targets = _parse_shadow_targets(
+        settings.signal_live_exchange_targets,
+        fallback_ws_url=settings.signal_live_ws_url,
+    )
     strict_shard_mode = settings.worker_shard_index < 0 and bool(settings.redis_url)
     no_slot_streak = 0
     fail_open_active = False
@@ -1349,34 +1441,20 @@ async def main() -> None:
             log.exception("Failed to initialize ingest owner redis lease")
             ingest_lease = None
             redis_lease_client = None
-    shadow_should_run = settings.signal_shadow_mode_enabled and (
+    shadow_should_run = settings.signal_shadow_mode_enabled and bool(shadow_targets) and (
         ingest_lease is None and shard_index == 0
     )
     if shadow_should_run:
-        symbols = _parse_shadow_symbols(settings.signal_live_shadow_symbols)
-        shadow_cache = MarketStateCache(
-            ttl_seconds=max(30, settings.worker_interval_seconds * 12),
-            max_points_per_symbol=1200,
-            max_symbols=max(100, len(symbols) * 4),
-        )
-        shadow_ingestor = LiveShadowIngestor(
-            cache=shadow_cache,
-            symbols=symbols,
-            ws_url=settings.signal_live_ws_url,
-            reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
-            reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
-            reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
-        )
-        shadow_stop_event = asyncio.Event()
-        shadow_task = asyncio.create_task(
-            shadow_ingestor.run(stop_event=shadow_stop_event),
-            name="live-shadow-ingest",
-        )
-        log.info(
-            "Shadow live ingest started: ws_url=%s symbols=%d",
-            settings.signal_live_ws_url,
-            len(symbols),
-        )
+        shadow_runtimes = _start_shadow_runtimes(symbols=shadow_symbols, targets=shadow_targets)
+        for runtime in shadow_runtimes:
+            log.info(
+                "Shadow live ingest started: exchange=%s ws_url=%s symbols=%d",
+                runtime.target.exchange,
+                runtime.target.ws_url,
+                len(shadow_symbols),
+            )
+    elif settings.signal_shadow_mode_enabled and not shadow_targets:
+        log.warning("Shadow live ingest enabled, but no exchange targets configured")
     elif settings.signal_shadow_mode_enabled and ingest_lease is None:
         log.info(
             "Shadow live ingest is enabled but skipped on shard_index=%s (runs only on shard 0)",
@@ -1441,43 +1519,21 @@ async def main() -> None:
                 is_owner_now = await ingest_lease.try_acquire_or_renew()
                 if is_owner_now and not ingest_lease_state.acquired_once:
                     ingest_lease_state.acquired_once = True
-                if is_owner_now and shadow_task is None:
-                    shadow_cache = MarketStateCache(
-                        ttl_seconds=max(30, settings.worker_interval_seconds * 12),
-                        max_points_per_symbol=1200,
-                        max_symbols=max(100, len(shadow_symbols) * 4),
-                    )
-                    shadow_ingestor = LiveShadowIngestor(
-                        cache=shadow_cache,
-                        symbols=shadow_symbols,
-                        ws_url=settings.signal_live_ws_url,
-                        reconnect_delay_seconds=settings.signal_live_ws_reconnect_seconds,
-                        reconnect_max_delay_seconds=settings.signal_live_ws_reconnect_max_seconds,
-                        reconnect_jitter_seconds=settings.signal_live_ws_reconnect_jitter_seconds,
-                    )
-                    shadow_stop_event = asyncio.Event()
-                    shadow_task = asyncio.create_task(
-                        shadow_ingestor.run(stop_event=shadow_stop_event),
-                        name="live-shadow-ingest",
-                    )
+                if is_owner_now and not shadow_runtimes and shadow_targets:
+                    shadow_runtimes = _start_shadow_runtimes(symbols=shadow_symbols, targets=shadow_targets)
                     ingest_lease_state.is_owner = True
-                    log.info(
-                        "Shadow live ingest started by lease owner: ws_url=%s symbols=%d",
-                        settings.signal_live_ws_url,
-                        len(shadow_symbols),
-                    )
-                elif (not is_owner_now) and shadow_task is not None:
+                    for runtime in shadow_runtimes:
+                        log.info(
+                            "Shadow live ingest started by lease owner: exchange=%s ws_url=%s symbols=%d",
+                            runtime.target.exchange,
+                            runtime.target.ws_url,
+                            len(shadow_symbols),
+                        )
+                elif (not is_owner_now) and shadow_runtimes:
                     ingest_lease_state.is_owner = False
                     ingest_lease_state.lost_once = True
-                    if shadow_stop_event is not None:
-                        shadow_stop_event.set()
-                    shadow_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await shadow_task
-                    shadow_task = None
-                    shadow_ingestor = None
-                    shadow_stop_event = None
-                    shadow_cache = None
+                    await _stop_shadow_runtimes(shadow_runtimes)
+                    shadow_runtimes = []
                     log.warning("Shadow ingest ownership lost: stopping local ingest task")
             if settings.signal_engine_mode == "rsi":
                 if shard_index >= 0:
@@ -1523,34 +1579,35 @@ async def main() -> None:
                         log.exception("Signal retention prune failed")
 
             if (
-                shadow_ingestor is not None
-                and shadow_cache is not None
+                shadow_runtimes
                 and loop_cycle % max(1, settings.signal_live_shadow_log_interval_cycles) == 0
             ):
-                stats = shadow_ingestor.stats
-                log.info(
-                    (
-                        "Shadow ingest stats: connected=%s attempts=%d reconnects=%d "
-                        "disconnects=%d timeouts=%d errors=%d decode_failures=%d "
-                        "pongs_sent=%d subscriptions_sent=%d messages=%d updates=%d "
-                        "cache_age_ms=%d symbols=%d points=%d last_event_ts_ms=%d"
-                    ),
-                    stats.connected,
-                    stats.attempts_total,
-                    stats.reconnects,
-                    stats.disconnects_total,
-                    stats.timeouts_total,
-                    stats.errors_total,
-                    stats.decode_failures_total,
-                    stats.pongs_sent_total,
-                    stats.subscriptions_sent_total,
-                    stats.messages_total,
-                    stats.updates_total,
-                    stats.cache_age_ms,
-                    shadow_cache.symbols_count(),
-                    shadow_cache.points_count(),
-                    stats.last_event_ts_ms,
-                )
+                for runtime in shadow_runtimes:
+                    stats = runtime.ingestor.stats
+                    log.info(
+                        (
+                            "Shadow ingest stats: exchange=%s connected=%s attempts=%d reconnects=%d "
+                            "disconnects=%d timeouts=%d errors=%d decode_failures=%d "
+                            "pongs_sent=%d subscriptions_sent=%d messages=%d updates=%d "
+                            "cache_age_ms=%d symbols=%d points=%d last_event_ts_ms=%d"
+                        ),
+                        runtime.target.exchange,
+                        stats.connected,
+                        stats.attempts_total,
+                        stats.reconnects,
+                        stats.disconnects_total,
+                        stats.timeouts_total,
+                        stats.errors_total,
+                        stats.decode_failures_total,
+                        stats.pongs_sent_total,
+                        stats.subscriptions_sent_total,
+                        stats.messages_total,
+                        stats.updates_total,
+                        stats.cache_age_ms,
+                        runtime.cache.symbols_count(),
+                        runtime.cache.points_count(),
+                        stats.last_event_ts_ms,
+                    )
             if loop_cycle % max(1, settings.signal_live_shadow_log_interval_cycles) == 0:
                 log.info(
                     (
@@ -1571,12 +1628,8 @@ async def main() -> None:
 
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:
-        if shadow_stop_event is not None:
-            shadow_stop_event.set()
-        if shadow_task is not None:
-            shadow_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await shadow_task
+        if shadow_runtimes:
+            await _stop_shadow_runtimes(shadow_runtimes)
         if ingest_lease is not None:
             await ingest_lease.release_if_owner()
         if shard_slot_guard is not None:
